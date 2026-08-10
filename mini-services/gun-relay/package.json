@@ -1,0 +1,15 @@
+{
+  "name": "dhobbytv-gun-relay",
+  "version": "1.0.0",
+  "description": "DhobbyTV Gun.js relay - P2P matchmaking & presence (gratis)",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "gun": "^0.2020.1240"
+  }
+}

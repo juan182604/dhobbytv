@@ -20,7 +20,7 @@ interface PartnerInfo {
 }
 
 interface VerificationTarget {
-  socketId: string
+  peerId: string
   username: string
   gender: string
 }
@@ -36,12 +36,12 @@ interface DhobbytvState {
   isSearching: boolean
   onlineCount: number
   verificationQueue: Array<{
-    socketId: string
+    peerId: string
     username: string
     gender: string
-    joinedAt: number
+    timestamp: number
   }>
-  verificationAdminSocketId: string | null
+  verificationAdminPeerId: string | null
   verificationTarget: VerificationTarget | null
   verificationMessages: Array<{ from: string; text: string; time: string }>
   messages: Array<{ from: string; text: string; time: string }>
@@ -56,7 +56,7 @@ interface DhobbytvState {
   setSearching: (searching: boolean) => void
   setOnlineCount: (count: number) => void
   setVerificationQueue: (queue: DhobbytvState['verificationQueue']) => void
-  setVerificationAdminSocketId: (id: string | null) => void
+  setVerificationAdminPeerId: (id: string | null) => void
   setVerificationTarget: (target: VerificationTarget | null) => void
   addMessage: (from: string, text: string) => void
   addVerificationMessage: (from: string, text: string) => void
@@ -77,7 +77,7 @@ const initialState = {
   isSearching: false,
   onlineCount: 0,
   verificationQueue: [],
-  verificationAdminSocketId: null,
+  verificationAdminPeerId: null,
   verificationTarget: null as VerificationTarget | null,
   verificationMessages: [] as Array<{ from: string; text: string; time: string }>,
   messages: [],
@@ -100,7 +100,7 @@ export const useDhobbytvStore = create<DhobbytvState>((set) => ({
   setSearching: (searching) => set({ isSearching: searching }),
   setOnlineCount: (count) => set({ onlineCount: count }),
   setVerificationQueue: (queue) => set({ verificationQueue: queue }),
-  setVerificationAdminSocketId: (id) => set({ verificationAdminSocketId: id }),
+  setVerificationAdminPeerId: (id) => set({ verificationAdminPeerId: id }),
   setVerificationTarget: (target) => set({ verificationTarget: target }),
   addMessage: (from, text) =>
     set((state) => ({

@@ -115,7 +115,7 @@ function AdContent({ ad }: { ad: Ad }) {
         <p className={`${textStyle} font-bold text-center`} style={{ color: ad.textColor, textShadow: `0 0 8px ${ad.textColor}60` }}>{ad.title}</p>
       </div>
     )
-  )
+  }
 
   // Default banner style
   return (

@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useRef, useCallback, useState } from 'react'
-import { io, Socket } from 'socket.io-client'
+import Peer from 'peerjs'
 import { useDhobbytvStore, AppView } from '@/store/useDhobbytvStore'
 import { COUNTRIES, HOBBIES, getCountryFlag, getCountryName, getGenderLabel, getGenderShort } from '@/lib/countries'
 import { Button } from '@/components/ui/button'
@@ -19,6 +19,37 @@ import {
 } from '@/components/ui/dialog'
 import { Toaster, toast } from 'sonner'
 import { AdBanner, AdPopup } from './AdBanner'
+import {
+  getGun,
+  genPeerId,
+  createPeer,
+  goOnline,
+  goOffline,
+  watchOnlineCount,
+  joinSearching,
+  leaveSearching,
+  watchForMatch,
+  joinVerifyQueue,
+  leaveVerifyQueue,
+  watchVerifyQueue,
+  signalVerificationStart,
+  watchVerificationSignal,
+  clearVerificationSignal,
+  cleanupPeer,
+  stopStream,
+} from '@/lib/p2p'
+
+// ==================== VARIABLES GLOBALES P2P ====================
+// Persisten entre cambios de vista sin re-render
+let globalPeer: Peer | null = null
+let globalStream: MediaStream | null = null
+let globalGun: any = null
+let globalPeerId: string | null = null
+
+function setGlobalPeer(p: Peer | null) { globalPeer = p }
+function setGlobalStream(s: MediaStream | null) { globalStream = s }
+function setGlobalGun(g: any) { globalGun = g }
+function setGlobalPeerId(id: string | null) { globalPeerId = id }
 
 // ==================== LOGIN ====================
 function LoginView() {
@@ -156,7 +187,7 @@ function VerificationPendingView() {
   const user = useDhobbytvStore((s) => s.user)
   const setView = useDhobbytvStore((s) => s.setView)
 
-  const startVerification = () => {
+  const startVerification = async () => {
     setView('verification')
   }
 
@@ -178,86 +209,113 @@ function VerificationPendingView() {
   )
 }
 
-// ==================== VERIFICATION WAITING (en cola) ====================
+// ==================== VERIFICATION WAITING (en cola, camara lista, esperando admin via Gun.js + PeerJS) ====================
 function VerificationView() {
   const user = useDhobbytvStore((s) => s.user)
-  const [socketStatus, setSocketStatus] = useState<'connecting' | 'connected' | 'error'>('connecting')
-  const [position, setPosition] = useState<number | null>(null)
-  const socketRef = useRef<Socket | null>(null)
-  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [status, setStatus] = useState<'init' | 'waiting' | 'error'>('init')
+  const [position, setPosition] = useState(0)
 
   useEffect(() => {
     let mounted = true
-    const connectSocket = () => {
+
+    const setup = async () => {
+      // 1. Inicializar Gun.js
+      const gun = await getGun()
       if (!mounted) return
-      setSocketStatus('connecting')
-      const socket = io('/?XTransformPort=3003', { transports: ['websocket'], reconnection: false, timeout: 8000 })
-      socketRef.current = socket
+      setGlobalGun(gun)
 
-      const timeout = setTimeout(() => {
-        if (mounted && !socket.connected) {
-          socket.disconnect()
-          setSocketStatus('error')
-          reconnectTimerRef.current = setTimeout(connectSocket, 10000)
-        }
-      }, 7000)
+      // 2. Crear PeerJS
+      const peerId = genPeerId(user!.username)
+      setGlobalPeerId(peerId)
+      const peer = createPeer(peerId)
+      setGlobalPeer(peer)
 
-      socket.on('connect', () => {
-        if (!mounted) return
-        clearTimeout(timeout)
-        setSocketStatus('connected')
-        socket.emit('join-verification-queue', { username: user?.username, gender: user?.gender })
+      peer.on('error', (err) => {
+        console.error('PeerJS error:', err)
+        if (mounted) setStatus('error')
       })
-      socket.on('in-verification-queue', (data: { position: number }) => {
-        if (mounted) setPosition(data.position)
-      })
-      socket.on('start-verification', (data: { adminSocketId: string }) => {
+
+      peer.on('open', async () => {
         if (!mounted) return
-        useDhobbytvStore.getState().setVerificationAdminSocketId(data.adminSocketId)
-        useDhobbytvStore.getState().setView('verification-video')
-        socket.disconnect()
-      })
-      socket.on('verification-accepted', () => {
-        if (!mounted) return
-        const currentUser = useDhobbytvStore.getState().user
-        if (currentUser) {
-          useDhobbytvStore.getState().setUser({ ...currentUser, verified: true })
-          fetch('/api/verify-user', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: currentUser.username }) })
+
+        // 3. Obtener camara
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+          if (!mounted) { stopStream(stream); return }
+          setGlobalStream(stream)
+          setStatus('waiting')
+        } catch {
+          if (mounted) { toast.error('No se pudo acceder a la camara'); setStatus('error') }
+          return
         }
-        toast.success('Has sido verificado!')
-        useDhobbytvStore.getState().setView('main')
-        socket.disconnect()
-      })
-      socket.on('verification-rejected', () => {
-        if (!mounted) return
-        const currentUser = useDhobbytvStore.getState().user
-        if (currentUser) fetch('/api/delete-user', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: currentUser.username }) })
-        toast.error('Verificacion rechazada. Tu cuenta ha sido eliminada.')
-        useDhobbytvStore.getState().setUser(null)
-        useDhobbytvStore.getState().setView('login')
-        socket.disconnect()
-      })
-      socket.on('disconnect', () => {
-        if (!mounted) return
-        setSocketStatus('error')
-        reconnectTimerRef.current = setTimeout(connectSocket, 5000)
-      })
-      socket.on('connect_error', () => {
-        if (!mounted) return
-        setSocketStatus('error')
+
+        // 4. Agregarse a la cola de verificacion en Gun.js
+        joinVerifyQueue(gun, peerId, { username: user!.username, gender: user!.gender })
+
+        // 5. Escuchar posicion en la cola
+        const queueItems = new Map<string, any>()
+        const posInterval = setInterval(() => {
+          if (!mounted) return
+          let pos = 0
+          const now = Date.now()
+          queueItems.forEach((data) => {
+            if (data && data.timestamp && now - data.timestamp < 300000 && data.peerId !== peerId) pos++
+          })
+          // Ordenar por timestamp
+          const sorted = [...queueItems.values()]
+            .filter((d) => d && d.timestamp && now - d.timestamp < 300000 && d.peerId !== peerId)
+            .sort((a, b) => a.timestamp - b.timestamp)
+          pos = sorted.findIndex((d) => d.peerId === peerId) + 1
+          if (pos <= 0) pos = queueItems.size
+          setPosition(pos)
+        }, 3000)
+
+        gun.get('dhobbytv/verify-queue').map().on((data: any, key: string) => {
+          if (!data || !data.peerId) { queueItems.delete(key); return }
+          queueItems.set(key, data)
+        })
+
+        // 6. Escuchar seal de que el admin se conecto
+        watchVerificationSignal(gun, peerId, (adminPeerId) => {
+          if (!mounted) return
+          // Admin se conecto - guardar su peerId y pasar a video
+          useDhobbytvStore.getState().setVerificationAdminPeerId(adminPeerId)
+          clearVerificationSignal(gun, peerId)
+          leaveVerifyQueue(gun, peerId)
+          useDhobbytvStore.getState().setView('verification-video')
+        })
+
+        // Cleanup
+        const origCleanup = () => {
+          clearInterval(posInterval)
+          leaveVerifyQueue(gun, peerId)
+          clearVerificationSignal(gun, peerId)
+        }
+        return origCleanup
       })
     }
-    connectSocket()
+
+    setup()
+
     return () => {
       mounted = false
-      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current)
-      socketRef.current?.disconnect()
+      stopStream(globalStream)
+      setGlobalStream(null)
+      if (globalPeerId && globalGun) leaveVerifyQueue(globalGun, globalPeerId)
+      if (globalPeerId && globalGun) clearVerificationSignal(globalGun, globalPeerId)
     }
   }, [])
 
   const handleExit = () => {
-    if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current)
-    socketRef.current?.disconnect()
+    stopStream(globalStream)
+    setGlobalStream(null)
+    cleanupPeer(globalPeer)
+    setGlobalPeer(null)
+    if (globalPeerId && globalGun) {
+      leaveVerifyQueue(globalGun, globalPeerId)
+      clearVerificationSignal(globalGun, globalPeerId)
+    }
+    setGlobalPeerId(null)
     useDhobbytvStore.getState().setView('verification-pending')
   }
 
@@ -269,28 +327,28 @@ function VerificationView() {
           <h2 className="text-2xl font-bold">Esperando Administrador</h2>
           <p className="text-gray-400">Tu camara esta lista. Cuando un admin se conecte, se iniciara la verificacion por video.</p>
 
-          {socketStatus === 'connecting' && (
+          {status === 'init' && (
             <div className="flex items-center justify-center gap-2 text-blue-400">
               <div className="w-2 h-2 bg-blue-400 rounded-full animate-pulse" />
               Conectando...
             </div>
           )}
-          {socketStatus === 'connected' && (
+          {status === 'waiting' && (
             <div className="space-y-2">
               <div className="flex items-center justify-center gap-2 text-green-400">
                 <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse" />
                 En cola de verificacion
               </div>
-              {position !== null && <p className="text-gray-300">Posicion: <span className="text-purple-400 font-bold">#{position}</span></p>}
+              {position > 0 && <p className="text-gray-300">Posicion: <span className="text-purple-400 font-bold">#{position}</span></p>}
             </div>
           )}
-          {socketStatus === 'error' && (
+          {status === 'error' && (
             <div className="space-y-2">
               <div className="flex items-center justify-center gap-2 text-red-400">
                 <div className="w-2 h-2 bg-red-400 rounded-full" />
-                Servidor no disponible
+                Error de conexion
               </div>
-              <p className="text-gray-500 text-xs">Reintentando automaticamente...</p>
+              <p className="text-gray-500 text-xs">Asegurate de tener camara y buena conexion</p>
             </div>
           )}
           <Button variant="outline" className="text-gray-400 border-gray-600" onClick={handleExit}>Volver atras</Button>
@@ -300,173 +358,115 @@ function VerificationView() {
   )
 }
 
-// ==================== VERIFICATION VIDEO (usuario - P2P chat con admin) ====================
+// ==================== VERIFICATION VIDEO (usuario - P2P con admin via PeerJS) ====================
 function VerificationVideoView() {
   const user = useDhobbytvStore((s) => s.user)
-  const verificationAdminSocketId = useDhobbytvStore((s) => s.verificationAdminSocketId)
+  const verificationAdminPeerId = useDhobbytvStore((s) => s.verificationAdminPeerId)
   const verificationMessages = useDhobbytvStore((s) => s.verificationMessages)
   const addVerificationMessage = useDhobbytvStore((s) => s.addVerificationMessage)
-  const clearVerificationMessages = useDhobbytvStore((s) => s.clearVerificationMessages)
 
-  const [localStream, setLocalStream] = useState<MediaStream | null>(null)
-  const [cameraError, setCameraError] = useState(false)
   const [statusMsg, setStatusMsg] = useState('Conectando con administrador...')
   const [chatInput, setChatInput] = useState('')
 
   const localVideoRef = useRef<HTMLVideoElement>(null)
   const remoteVideoRef = useRef<HTMLVideoElement>(null)
-  const peerRef = useRef<RTCPeerConnection | null>(null)
-  const socketRef = useRef<Socket | null>(null)
-  const dataChannelRef = useRef<RTCDataChannel | null>(null)
+  const dataConnRef = useRef<any>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [verificationMessages])
 
   useEffect(() => {
+    if (!globalPeer || !verificationAdminPeerId) {
+      setStatusMsg('Error: no se encontro la conexion. Volviendo...')
+      setTimeout(() => { if (mounted) useDhobbytvStore.getState().setView('verification') }, 2000)
+      return
+    }
     let mounted = true
-    const setup = async () => {
-      // Get camera
-      let stream: MediaStream
+
+    // Mostrar video local
+    if (localVideoRef.current && globalStream) {
+      localVideoRef.current.srcObject = globalStream
+    }
+
+    // 1. Conectar data channel con el admin (chat)
+    const dataConn = globalPeer.connect(verificationAdminPeerId, { reliable: true })
+    dataConnRef.current = dataConn
+
+    dataConn.on('open', () => {
+      if (!mounted) return
+      setStatusMsg('Conectado con admin. Muestra tu identificacion.')
+      dataConn.send(JSON.stringify({ type: 'verify-user-info', username: user?.username, gender: user?.gender }))
+    })
+
+    dataConn.on('data', (raw: any) => {
+      if (!mounted) return
       try {
-        stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+        const msg = typeof raw === 'string' ? JSON.parse(raw) : raw
+        if (msg.type === 'chat') {
+          addVerificationMessage('Admin', msg.text)
+        } else if (msg.type === 'verify-accepted') {
+          toast.success('Has sido verificado!')
+          const currentUser = useDhobbytvStore.getState().user
+          if (currentUser) {
+            useDhobbytvStore.getState().setUser({ ...currentUser, verified: true })
+            fetch('/api/verify-user', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: currentUser.username }) })
+          }
+          setTimeout(() => { useDhobbytvStore.getState().setView('main') }, 1000)
+        } else if (msg.type === 'verify-rejected') {
+          toast.error('Verificacion rechazada.')
+          const currentUser = useDhobbytvStore.getState().user
+          if (currentUser) fetch('/api/delete-user', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: currentUser.username }) })
+          setTimeout(() => { useDhobbytvStore.getState().setUser(null); useDhobbytvStore.getState().setView('login') }, 1000)
+        }
       } catch {
-        if (mounted) { setCameraError(true); toast.error('No se pudo acceder a la camara') }
-        return
+        // texto plano
+        addVerificationMessage('Admin', String(raw))
       }
-      if (!mounted) { stream.getTracks().forEach((t) => t.stop()); return }
-      setLocalStream(stream)
-      if (localVideoRef.current) localVideoRef.current.srcObject = stream
+    })
 
-      if (!verificationAdminSocketId) {
-        setStatusMsg('Error: no se encontro el admin. Volviendo a la cola...')
-        setTimeout(() => { if (mounted) useDhobbytvStore.getState().setView('verification') }, 2000)
-        return
-      }
-
-      // Connect socket for WebRTC signaling
-      const socket = io('/?XTransformPort=3003', { transports: ['websocket'], reconnection: false, timeout: 8000 })
-      socketRef.current = socket
-
-      socket.on('connect', () => { if (mounted) setStatusMsg('Esperando al admin...') })
-
-      // Create peer (user is answerer)
-      const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] })
-      peerRef.current = pc
-      stream.getTracks().forEach((track) => pc.addTrack(track, stream))
-
-      // Receive DataChannel from admin (who is the offerer)
-      pc.ondatachannel = (e) => {
-        const dc = e.channel
-        dc.onmessage = (ev) => { if (mounted) addVerificationMessage('Admin', ev.data) }
-        dc.onopen = () => { if (mounted) { dataChannelRef.current = dc; setStatusMsg('Conectado con admin. Muestra tu identificacion.') } }
-        dataChannelRef.current = dc
-      }
-
-      // Receive admin's video (if they turn camera on)
-      pc.ontrack = (e) => { if (remoteVideoRef.current && mounted) remoteVideoRef.current.srcObject = e.streams[0] }
-
-      pc.onicecandidate = (e) => {
-        if (e.candidate && mounted) socket.emit('webrtc-ice-candidate', { targetId: verificationAdminSocketId, candidate: e.candidate })
-      }
-
-      socket.on('webrtc-offer', async (data: { fromId: string; offer: RTCSessionDescriptionInit }) => {
-        if (!mounted) return
-        try {
-          await pc.setRemoteDescription(new RTCSessionDescription(data.offer))
-          const answer = await pc.createAnswer()
-          await pc.setLocalDescription(answer)
-          socket.emit('webrtc-answer', { targetId: data.fromId, answer })
-          setStatusMsg('Conectado con admin. Muestra tu identificacion por camara.')
-        } catch {
-          if (mounted) { setStatusMsg('Error de conexion. Volviendo a la cola...'); setTimeout(() => useDhobbytvStore.getState().setView('verification'), 3000) }
-        }
-      })
-
-      socket.on('verification-accepted', () => {
-        if (!mounted) return
-        const currentUser = useDhobbytvStore.getState().user
-        if (currentUser) {
-          useDhobbytvStore.getState().setUser({ ...currentUser, verified: true })
-          fetch('/api/verify-user', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: currentUser.username }) })
-        }
-        toast.success('Verificado! Bienvenido a dhobbytv')
-        cleanup()
-        useDhobbytvStore.getState().setView('main')
-      })
-
-      socket.on('verification-rejected', () => {
-        if (!mounted) return
-        const currentUser = useDhobbytvStore.getState().user
-        if (currentUser) fetch('/api/delete-user', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: currentUser.username }) })
-        toast.error('Rechazado')
-        cleanup()
-        useDhobbytvStore.getState().setUser(null)
-        useDhobbytvStore.getState().setView('login')
-      })
-
-      socket.on('verification-admin-disconnected', () => {
-        if (!mounted) return
-        toast.error('El admin se desconecto')
-        setStatusMsg('Volviendo a la cola...')
-        setTimeout(() => { cleanup(); useDhobbytvStore.getState().setView('verification') }, 2000)
+    // 2. Recibir llamada del admin (video) - el admin es quien llama
+    const handleCall = (call: any) => {
+      if (!mounted || !globalStream) return
+      call.answer(globalStream)
+      call.on('stream', (remoteStream: MediaStream) => {
+        if (remoteVideoRef.current && mounted) remoteVideoRef.current.srcObject = remoteStream
       })
     }
 
-    setup()
+    globalPeer.on('call', handleCall)
 
-    const cleanup = () => {
+    return () => {
       mounted = false
-      localStream?.getTracks().forEach((t) => t.stop())
-      peerRef.current?.close()
-      socketRef.current?.disconnect()
-      dataChannelRef.current = null
+      if (dataConnRef.current) try { dataConnRef.current.close() } catch {}
     }
-    return cleanup
   }, [])
 
   const handleSendMessage = () => {
-    if (!chatInput.trim() || !dataChannelRef.current) return
-    dataChannelRef.current.send(chatInput)
+    if (!chatInput.trim() || !dataConnRef.current) return
+    dataConnRef.current.send(JSON.stringify({ type: 'chat', text: chatInput }))
     addVerificationMessage(user?.username || 'Tu', chatInput)
     setChatInput('')
   }
 
   const handleExit = () => {
-    localStream?.getTracks().forEach((t) => t.stop())
-    peerRef.current?.close()
-    socketRef.current?.disconnect()
+    if (dataConnRef.current) try { dataConnRef.current.close() } catch {}
+    stopStream(globalStream)
+    setGlobalStream(null)
+    setGlobalPeer(null)
+    setGlobalPeerId(null)
     useDhobbytvStore.getState().setView('verification-pending')
-  }
-
-  if (cameraError) {
-    return (
-      <div className="min-h-screen flex items-center justify-center p-4 bg-gradient-to-br from-purple-900 via-indigo-900 to-black">
-        <Card className="w-full max-w-md bg-gray-900/80 border-gray-700 text-white text-center">
-          <CardContent className="pt-8 pb-8 space-y-4">
-            <div className="text-6xl">📷</div>
-            <h2 className="text-xl font-bold">Error de Camara</h2>
-            <p className="text-gray-400">Necesitas permitir el acceso a tu camara para la verificacion.</p>
-            <Button onClick={() => useDhobbytvStore.getState().setView('verification-pending')} className="bg-purple-600 hover:bg-purple-700">Volver</Button>
-          </CardContent>
-        </Card>
-      </div>
-    )
   }
 
   return (
     <div className="min-h-screen bg-gray-950 text-white flex flex-col">
-      {/* Header */}
       <header className="border-b border-gray-800 px-4 py-3 shrink-0">
         <div className="flex items-center justify-between max-w-6xl mx-auto">
           <h1 className="text-xl font-black"><span className="text-purple-400">dhobby</span><span className="text-green-400">tv</span><span className="text-yellow-400 text-sm ml-2">VERIFICACION</span></h1>
           <Button variant="ghost" size="sm" className="text-gray-400" onClick={handleExit}>Salir</Button>
         </div>
       </header>
-
-      {/* Main content - same layout as MainView P2P */}
       <main className="flex-1 flex flex-col max-w-6xl mx-auto w-full p-4">
         <div className="flex-1 flex flex-col gap-3">
-          {/* Partner info bar */}
           <div className="flex items-center justify-between bg-gray-900 rounded-lg px-4 py-2">
             <div className="flex items-center gap-2">
               <span className="font-medium">Administrador</span>
@@ -474,32 +474,22 @@ function VerificationVideoView() {
             </div>
             <p className="text-yellow-400 text-sm">Muestra tu identificacion por camara</p>
           </div>
-
-          {/* Video area - same as MainView */}
           <div className="relative rounded-xl overflow-hidden bg-black flex-1 min-h-0">
-            {/* Remote (admin) video - may be blank if admin camera off */}
             <video ref={remoteVideoRef} autoPlay playsInline className="w-full h-full object-cover" />
-            {/* If no remote video, show placeholder */}
-            <div className="absolute inset-0 flex items-center justify-center pointer-events-none" id="admin-cam-placeholder">
+            <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
               <div className="text-center">
                 <div className="text-4xl mb-2">👨‍💼</div>
                 <p className="text-gray-400 text-sm">Camara del admin apagada</p>
               </div>
             </div>
-            {/* Local (user) video PiP */}
             <div className="absolute bottom-3 right-3 w-32 h-24 sm:w-40 sm:h-30 rounded-lg overflow-hidden border-2 border-green-500 shadow-lg">
               <video ref={localVideoRef} autoPlay playsInline muted className="w-full h-full object-cover" />
             </div>
-            {/* Labels */}
             <div className="absolute bottom-3 left-3 bg-green-600 text-white text-xs px-2 py-1 rounded-full flex items-center gap-1">
               <div className="w-2 h-2 bg-white rounded-full animate-pulse" />TU CAMARA
             </div>
           </div>
-
-          {/* Status message */}
           <p className="text-center text-gray-300 text-sm">{statusMsg}</p>
-
-          {/* Chat area */}
           <div className="bg-gray-900 rounded-lg h-32 overflow-y-auto p-3 space-y-1">
             {verificationMessages.map((msg, i) => (
               <p key={i} className={`text-sm ${msg.from === 'Sistema' ? 'text-purple-400 italic' : msg.from === 'Admin' ? 'text-blue-400' : 'text-green-400'}`}>
@@ -508,8 +498,6 @@ function VerificationVideoView() {
             ))}
             <div ref={messagesEndRef} />
           </div>
-
-          {/* Chat input */}
           <div className="flex gap-2">
             <Input placeholder="Escribe un mensaje..." value={chatInput} onChange={(e) => setChatInput(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()} className="bg-gray-800 border-gray-700 text-white flex-1" />
             <Button onClick={handleSendMessage} className="bg-purple-600 hover:bg-purple-700">Enviar</Button>
@@ -520,170 +508,155 @@ function VerificationVideoView() {
   )
 }
 
-// ==================== ADMIN VERIFICATION P2P (admin side - pantalla completa como chat) ====================
+// ==================== ADMIN VERIFICATION P2P (admin side) ====================
 function AdminVerificationView() {
   const user = useDhobbytvStore((s) => s.user)
   const verificationTarget = useDhobbytvStore((s) => s.verificationTarget)
   const verificationMessages = useDhobbytvStore((s) => s.verificationMessages)
   const addVerificationMessage = useDhobbytvStore((s) => s.addVerificationMessage)
 
-  const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null)
   const [adminCameraOn, setAdminCameraOn] = useState(false)
-  const [adminStream, setAdminStream] = useState<MediaStream | null>(null)
   const [chatInput, setChatInput] = useState('')
   const [statusMsg, setStatusMsg] = useState('Conectando con usuario...')
 
   const remoteVideoRef = useRef<HTMLVideoElement>(null)
   const localVideoRef = useRef<HTMLVideoElement>(null)
-  const peerRef = useRef<RTCPeerConnection | null>(null)
-  const socketRef = useRef<Socket | null>(null)
-  const dataChannelRef = useRef<RTCDataChannel | null>(null)
+  const dataConnRef = useRef<any>(null)
+  const mediaCallRef = useRef<any>(null)
+  const adminStreamRef = useRef<MediaStream | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
-  const audioCtxRef = useRef<AudioContext | null>(null)
 
   useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [verificationMessages])
 
   useEffect(() => {
-    if (!verificationTarget) return
+    if (!verificationTarget || !globalPeer) return
     let mounted = true
 
-    const setup = async () => {
-      const socket = io('/?XTransformPort=3003', { transports: ['websocket'], reconnection: false, timeout: 8000 })
-      socketRef.current = socket
+    setStatusMsg('Conectando con ' + verificationTarget.username + '...')
 
-      socket.on('connect', () => {
-        if (!mounted) return
-        socket.emit('user-online', { username: user?.username, gender: user?.gender, country: '', countryCode: '', verified: true, isAdmin: true })
-        socket.emit('admin-join-verification', { userSocketId: verificationTarget.socketId })
+    // 1. Conectar data channel con el usuario
+    const dataConn = globalPeer.connect(verificationTarget.peerId, { reliable: true })
+    dataConnRef.current = dataConn
+
+    dataConn.on('open', () => {
+      if (!mounted) return
+      setStatusMsg('Conectado. Esperando video del usuario...')
+    })
+
+    dataConn.on('data', (raw: any) => {
+      if (!mounted) return
+      try {
+        const msg = typeof raw === 'string' ? JSON.parse(raw) : raw
+        if (msg.type === 'chat') {
+          addVerificationMessage(verificationTarget.username, msg.text)
+        } else if (msg.type === 'verify-user-info') {
+          setStatusMsg(`Conectado con ${msg.username}. Esperando video...`)
+        }
+      } catch {
+        addVerificationMessage(verificationTarget.username, String(raw))
+      }
+    })
+
+    // 2. Llamar al usuario (video) - admin inicia la llamada
+    const makeCall = async () => {
+      if (!globalPeer || !verificationTarget) return
+      const call = globalPeer.call(verificationTarget.peerId, adminStreamRef.current || new MediaStream())
+      mediaCallRef.current = call
+
+      call.on('stream', (remoteStream: MediaStream) => {
+        if (remoteVideoRef.current && mounted) {
+          remoteVideoRef.current.srcObject = remoteStream
+          setStatusMsg('Conectado con ' + verificationTarget.username + '. Revisa su documento.')
+        }
       })
 
-      // Create peer (admin is offerer)
-      const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] })
-      peerRef.current = pc
-
-      // Create silent audio stream (no camera)
-      const audioCtx = new AudioContext()
-      audioCtxRef.current = audioCtx
-      const oscillator = audioCtx.createOscillator()
-      const dest = audioCtx.createMediaStreamDestination()
-      oscillator.connect(dest)
-      oscillator.start()
-      const silentStream = dest.stream
-      silentStream.getTracks().forEach((track) => pc.addTrack(track, silentStream))
-
-      // Create DataChannel for chat (admin is offerer, so creates the channel)
-      const dc = pc.createDataChannel('chat')
-      dc.onmessage = (e) => { if (mounted) addVerificationMessage(verificationTarget!.username, e.data) }
-      dc.onopen = () => { if (mounted) { dataChannelRef.current = dc; setStatusMsg('Conectado. Pide que muestre su identificacion.') } }
-      dataChannelRef.current = dc
-
-      // Receive user's video
-      pc.ontrack = (e) => {
+      call.on('close', () => {
         if (mounted) {
-          setRemoteStream(e.streams[0])
-          if (remoteVideoRef.current) remoteVideoRef.current.srcObject = e.streams[0]
+          toast.error('El usuario se desconecto')
+          handleBack()
         }
-      }
-
-      pc.onicecandidate = (e) => {
-        if (e.candidate && mounted) socket.emit('webrtc-ice-candidate', { targetId: verificationTarget!.socketId, candidate: e.candidate })
-      }
-
-      // Wait a bit for the join-verification to process, then create offer
-      setTimeout(async () => {
-        if (!mounted || !socket.connected) return
-        try {
-          const offer = await pc.createOffer()
-          await pc.setLocalDescription(offer)
-          socket.emit('webrtc-offer', { targetId: verificationTarget!.socketId, offer })
-        } catch (err) {
-          console.error('Failed to create offer:', err)
-        }
-      }, 1500)
-
-      socket.on('webrtc-answer', async (data: { fromId: string; answer: RTCSessionDescriptionInit }) => {
-        if (peerRef.current && mounted) await peerRef.current.setRemoteDescription(new RTCSessionDescription(data.answer))
-      })
-
-      socket.on('webrtc-ice-candidate', (data: { fromId: string; candidate: RTCIceCandidateInit }) => {
-        if (peerRef.current && mounted) peerRef.current.addIceCandidate(new RTCIceCandidate(data.candidate))
-      })
-
-      socket.on('verification-user-disconnected', () => {
-        if (mounted) { toast.error('El usuario se desconecto'); handleBack() }
       })
     }
 
-    setup()
+    // Esperar un poco y luego hacer la llamada de video
+    setTimeout(makeCall, 1000)
 
-    const cleanup = () => {
+    return () => {
       mounted = false
-      peerRef.current?.close()
-      socketRef.current?.disconnect()
-      adminStream?.getTracks().forEach((t) => t.stop())
-      audioCtxRef.current?.close?.()
-      dataChannelRef.current = null
+      try { dataConnRef.current?.close() } catch {}
+      try { mediaCallRef.current?.close() } catch {}
     }
-    return cleanup
-  }, [verificationTarget])
+  }, [])
 
-  // Toggle admin camera
   const toggleAdminCamera = async () => {
-    if (!peerRef.current || !socketRef.current) return
-
     if (adminCameraOn) {
-      // Turn off
-      const sender = peerRef.current.getSenders().find(s => s.track?.kind === 'video')
-      if (sender) { sender.track?.stop(); peerRef.current.removeTrack(sender) }
-      adminStream?.getTracks().forEach((t) => t.stop())
-      setAdminStream(null)
-      setAdminCameraOn(false)
+      stopStream(adminStreamRef.current)
+      adminStreamRef.current = null
       if (localVideoRef.current) localVideoRef.current.srcObject = null
+      setAdminCameraOn(false)
+      // Reemplazar tracks en la llamada activa
+      try {
+        const sender = mediaCallRef.current?.peerConnection?.getSenders()?.[0]
+        if (sender) sender.replaceTrack(new MediaStream().getVideoTracks()[0] || null as any)
+      } catch {}
       return
     }
 
-    // Turn on
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
-      setAdminStream(stream)
+      adminStreamRef.current = stream
       if (localVideoRef.current) localVideoRef.current.srcObject = stream
-      stream.getTracks().forEach((track) => peerRef.current!.addTrack(track, stream))
       setAdminCameraOn(true)
+      // Reemplazar tracks en la llamada activa
+      try {
+        const sender = mediaCallRef.current?.peerConnection?.getSenders()?.[0]
+        if (sender && stream.getVideoTracks()[0]) sender.replaceTrack(stream.getVideoTracks()[0])
+      } catch {}
     } catch {
       toast.error('No se pudo acceder a la camara')
     }
   }
 
-  const handleSendMessage = () => {
-    if (!chatInput.trim() || !dataChannelRef.current) return
-    dataChannelRef.current.send(chatInput)
-    addVerificationMessage(user?.username || 'Admin', chatInput)
-    setChatInput('')
-  }
-
   const handleAccept = () => {
-    if (!verificationTarget || !socketRef.current) return
-    socketRef.current.emit('admin-accept-verification', { userSocketId: verificationTarget.socketId })
-    fetch('/api/verify-user', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: verificationTarget.username }) })
-    toast.success(`${verificationTarget.username} verificado`)
+    const dataConn = dataConnRef.current
+    if (dataConn && dataConn.open) {
+      dataConn.send(JSON.stringify({ type: 'verify-accepted' }))
+    }
+    // Tambien actualizar via API
+    if (verificationTarget.username) {
+      fetch('/api/pending-users', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'verify-username', username: verificationTarget.username }),
+      })
+    }
+    toast.success('Usuario verificado')
     handleBack()
   }
 
   const handleReject = () => {
-    if (!verificationTarget || !socketRef.current) return
-    socketRef.current.emit('admin-reject-verification', { userSocketId: verificationTarget.socketId })
-    fetch('/api/delete-user', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: verificationTarget.username }) })
-    toast.error(`${verificationTarget.username} rechazado`)
+    const dataConn = dataConnRef.current
+    if (dataConn && dataConn.open) {
+      dataConn.send(JSON.stringify({ type: 'verify-rejected' }))
+    }
+    if (verificationTarget.username) {
+      fetch('/api/pending-users', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'reject-username', username: verificationTarget.username }),
+      })
+    }
+    toast.error('Usuario rechazado')
     handleBack()
   }
 
   const handleBack = () => {
-    peerRef.current?.close()
-    socketRef.current?.disconnect()
-    adminStream?.getTracks().forEach((t) => t.stop())
-    audioCtxRef.current?.close?.()
-    useDhobbytvStore.getState().clearVerificationMessages()
+    try { dataConnRef.current?.close() } catch {}
+    try { mediaCallRef.current?.close() } catch {}
+    stopStream(adminStreamRef.current)
+    adminStreamRef.current = null
+    dataConnRef.current = null
+    mediaCallRef.current = null
     useDhobbytvStore.getState().setVerificationTarget(null)
+    useDhobbytvStore.getState().clearVerificationMessages()
     useDhobbytvStore.getState().setView('admin')
   }
 
@@ -691,21 +664,14 @@ function AdminVerificationView() {
 
   return (
     <div className="min-h-screen bg-gray-950 text-white flex flex-col">
-      {/* Header */}
       <header className="border-b border-gray-800 px-4 py-3 shrink-0">
         <div className="flex items-center justify-between max-w-6xl mx-auto">
-          <div className="flex items-center gap-3">
-            <h1 className="text-xl font-black"><span className="text-purple-400">dhobby</span><span className="text-green-400">tv</span><span className="text-blue-400 text-sm ml-2">VERIFICACION</span></h1>
-            <Badge variant="outline" className="text-gray-400">{getGenderLabel(verificationTarget.gender)} {verificationTarget.username}</Badge>
-          </div>
+          <h1 className="text-xl font-black"><span className="text-purple-400">dhobby</span><span className="text-green-400">tv</span><span className="text-yellow-400 text-sm ml-2">VERIFICACION</span></h1>
           <Button variant="ghost" size="sm" className="text-gray-400" onClick={handleBack}>Volver al panel</Button>
         </div>
       </header>
-
-      {/* Same P2P layout as MainView */}
       <main className="flex-1 flex flex-col max-w-6xl mx-auto w-full p-4">
         <div className="flex-1 flex flex-col gap-3">
-          {/* User info bar */}
           <div className="flex items-center justify-between bg-gray-900 rounded-lg px-4 py-2">
             <div className="flex items-center gap-2">
               <span>{getGenderShort(verificationTarget.gender)}</span>
@@ -718,51 +684,35 @@ function AdminVerificationView() {
               </Button>
             </div>
           </div>
-
-          {/* Video area */}
           <div className="relative rounded-xl overflow-hidden bg-black flex-1 min-h-0">
-            {/* Remote (user) video - main view */}
             <video ref={remoteVideoRef} autoPlay playsInline className="w-full h-full object-cover" />
-            {/* Local (admin) video PiP */}
             <div className="absolute bottom-3 right-3 w-32 h-24 sm:w-40 sm:h-30 rounded-lg overflow-hidden border-2 border-blue-500 shadow-lg bg-gray-900">
               {adminCameraOn ? (
                 <video ref={localVideoRef} autoPlay playsInline muted className="w-full h-full object-cover" />
               ) : (
-                <div className="w-full h-full flex items-center justify-center">
-                  <div className="text-center">
-                    <div className="text-2xl">📷</div>
-                    <p className="text-gray-500 text-[10px] mt-1">Tu camara apagada</p>
-                  </div>
-                </div>
+                <div className="w-full h-full flex items-center justify-center"><div className="text-center"><div className="text-2xl">🔇</div><p className="text-xs text-gray-400 mt-1">Camara apagada</p></div></div>
               )}
             </div>
-            {/* User camera label */}
-            <div className="absolute bottom-3 left-3 bg-green-600 text-white text-xs px-2 py-1 rounded-full flex items-center gap-1">
-              <div className="w-2 h-2 bg-white rounded-full animate-pulse" />CAMARA DEL USUARIO
+            <div className="absolute bottom-3 left-3 bg-blue-600 text-white text-xs px-2 py-1 rounded-full">
+              {verificationTarget.username}
             </div>
           </div>
-
-          {/* Status */}
           <p className="text-center text-gray-300 text-sm">{statusMsg}</p>
-
-          {/* Chat area */}
           <div className="bg-gray-900 rounded-lg h-32 overflow-y-auto p-3 space-y-1">
             {verificationMessages.map((msg, i) => (
-              <p key={i} className={`text-sm ${msg.from === 'Sistema' ? 'text-purple-400 italic' : msg.from === (user?.username || 'Admin') ? 'text-blue-400' : 'text-green-400'}`}>
+              <p key={i} className={`text-sm ${msg.from === 'Sistema' ? 'text-purple-400 italic' : msg.from === user?.username ? 'text-blue-400' : 'text-green-400'}`}>
                 <span className="font-medium">{msg.from}:</span> {msg.text}
               </p>
             ))}
             <div ref={messagesEndRef} />
           </div>
-
-          {/* Chat input + action buttons */}
           <div className="flex gap-2">
-            <Input placeholder="Escribe un mensaje al usuario..." value={chatInput} onChange={(e) => setChatInput(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()} className="bg-gray-800 border-gray-700 text-white flex-1" />
-            <Button onClick={handleSendMessage} className="bg-purple-600 hover:bg-purple-700">Enviar</Button>
+            <Input placeholder="Escribe un mensaje..." value={chatInput} onChange={(e) => setChatInput(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && (() => { if (!chatInput.trim() || !dataConnRef.current) return; dataConnRef.current.send(JSON.stringify({ type: 'chat', text: chatInput })); addVerificationMessage(user?.username || 'Admin', chatInput); setChatInput('') })()} className="bg-gray-800 border-gray-700 text-white flex-1" />
+            <Button onClick={() => { if (!chatInput.trim() || !dataConnRef.current) return; dataConnRef.current.send(JSON.stringify({ type: 'chat', text: chatInput })); addVerificationMessage(user?.username || 'Admin', chatInput); setChatInput('') }} className="bg-purple-600 hover:bg-purple-700">Enviar</Button>
           </div>
           <div className="flex gap-2">
-            <Button onClick={handleAccept} className="flex-1 bg-green-600 hover:bg-green-700 font-bold">Aceptar (mayor de edad)</Button>
-            <Button onClick={handleReject} className="flex-1 bg-red-600 hover:bg-red-700 font-bold">Rechazar</Button>
+            <Button onClick={handleAccept} className="flex-1 bg-green-600 hover:bg-green-700">Aceptar (Verificar)</Button>
+            <Button onClick={handleReject} className="flex-1 bg-red-600 hover:bg-red-700">Rechazar (Eliminar)</Button>
           </div>
         </div>
       </main>
@@ -770,198 +720,208 @@ function AdminVerificationView() {
   )
 }
 
-// ==================== SUPER ADMIN PANEL ====================
-function SuperAdminView() {
+// ==================== ADMIN VIEW ====================
+function AdminView() {
   const user = useDhobbytvStore((s) => s.user)
-  const [activeTab, setActiveTab] = useState('pending')
-  const [stats, setStats] = useState<any>(null)
-  const [admins, setAdmins] = useState<any[]>([])
-  const [reportedUsers, setReportedUsers] = useState<any[]>([])
-  const [announcements, setAnnouncements] = useState<any[]>([])
-  const [newAnnouncement, setNewAnnouncement] = useState('')
-  const [newAdminUsername, setNewAdminUsername] = useState('')
-  const [newAdminPassword, setNewAdminPassword] = useState('')
-  const [newAdminGender, setNewAdminGender] = useState('Hombre')
-  const [suspendDialog, setSuspendDialog] = useState<{ userId: string; username: string } | null>(null)
-  const [suspendHours, setSuspendHours] = useState('')
-  const [banDialog, setBanDialog] = useState<{ userId: string; username: string } | null>(null)
-  const [banReason, setBanReason] = useState('')
-  const [selectedReportedUser, setSelectedReportedUser] = useState<any>(null)
-  const [pendingUsers, setPendingUsers] = useState<any[]>([])
-  const [ads, setAds] = useState<any[]>([])
-  const [adTitle, setAdTitle] = useState('')
-  const [adImageUrl, setAdImageUrl] = useState('')
-  const [adLinkUrl, setAdLinkUrl] = useState('')
-  const [adHtmlContent, setAdHtmlContent] = useState('')
-  const [adPosition, setAdPosition] = useState('top')
-  const [adDisplayStyle, setAdDisplayStyle] = useState('banner')
-  const [adBgColor, setAdBgColor] = useState('#6d28d9')
-  const [adTextColor, setAdTextColor] = useState('#ffffff')
-  const [adFontSize, setAdFontSize] = useState('sm')
-  const [adBorderRadius, setAdBorderRadius] = useState('lg')
-  const [adShowLogin, setAdShowLogin] = useState(false)
-  const [adShowMain, setAdShowMain] = useState(true)
+  const verificationQueue = useDhobbytvStore((s) => s.verificationQueue)
+  const setVerificationQueue = useDhobbytvStore((s) => s.setVerificationQueue)
+  const setVerificationTarget = useDhobbytvStore((s) => s.setVerificationTarget)
+  const clearVerificationMessages = useDhobbytvStore((s) => s.clearVerificationMessages)
 
-  const loadData = useCallback(async () => {
+  const [pendingUsers, setPendingUsers] = useState<any[]>([])
+  const [reportedUsers, setReportedUsers] = useState<any[]>([])
+  const [onlineCount, setOnlineCount] = useState(0)
+  const [gunReady, setGunReady] = useState(false)
+
+  const loadAdminData = async () => {
     try {
-      const [s, a, r, an, p, ad] = await Promise.all([
-        fetch('/api/super-admin-stats').then((r) => r.json()),
-        fetch('/api/manage-admins').then((r) => r.json()),
-        fetch('/api/reported-users').then((r) => r.json()),
-        fetch('/api/announcements?all=true').then((r) => r.json()),
+      const [pendingRes, reportedRes] = await Promise.all([
         fetch('/api/pending-users').then((r) => r.json()),
-        fetch('/api/ads?action=list').then((r) => r.json()),
+        fetch('/api/reported-users').then((r) => r.json()).catch(() => ({ users: [] })),
       ])
-      setStats(s); setAdmins(a.admins || []); setReportedUsers(r.users || []); setAnnouncements(an.announcements || []); setPendingUsers(p.users || []); setAds(ad.ads || [])
-    } catch { /* ignore */ }
+      if (pendingRes.users) setPendingUsers(pendingRes.users)
+      if (reportedRes.users) setReportedUsers(reportedRes.users)
+    } catch {}
+  }
+
+  // Gun.js + PeerJS setup para admin
+  useEffect(() => {
+    let mounted = true
+    let unsubQueue: (() => void) | null = null
+    let unsubOnline: (() => void) | null = null
+
+    const setup = async () => {
+      const gun = await getGun()
+      if (!mounted) return
+      setGlobalGun(gun)
+
+      // Crear PeerJS para el admin
+      const peerId = genPeerId(user!.username + '_admin')
+      setGlobalPeerId(peerId)
+      const peer = createPeer(peerId)
+      setGlobalPeer(peer)
+
+      peer.on('open', () => {
+        if (!mounted) return
+        setGunReady(true)
+        // Registrarse como online
+        goOnline(gun, peerId, {
+          username: user!.username,
+          gender: user!.gender,
+          country: '',
+          countryCode: '',
+          verified: true,
+          isAdmin: true,
+        })
+      })
+
+      peer.on('error', () => { if (mounted) setGunReady(false) })
+
+      // Escuchar cola de verificacion
+      unsubQueue = watchVerifyQueue(gun, (queue) => {
+        if (mounted) setVerificationQueue(queue)
+      })
+
+      // Escuchar conteo online
+      unsubOnline = watchOnlineCount(gun, (count) => {
+        if (mounted) setOnlineCount(count)
+      })
+    }
+
+    setup()
+    loadAdminData()
+    const refreshInterval = setInterval(loadAdminData, 10000)
+
+    return () => {
+      mounted = false
+      clearInterval(refreshInterval)
+      if (unsubQueue) unsubQueue()
+      if (unsubOnline) unsubOnline()
+      if (globalPeerId && globalGun) {
+        goOffline(globalGun, globalPeerId)
+      }
+      cleanupPeer(globalPeer)
+      setGlobalPeer(null)
+      setGlobalPeerId(null)
+    }
   }, [])
 
-  useEffect(() => { loadData() }, [loadData])
-  useEffect(() => { const i = setInterval(loadData, 15000); return () => clearInterval(i) }, [loadData])
+  const handleJoinVerification = async (target: any) => {
+    if (!globalPeer || !globalGun) {
+      toast.error('PeerJS no esta listo')
+      return
+    }
 
-  const handleCreateAdmin = async () => {
-    if (!newAdminUsername || !newAdminPassword) return toast.error('Completa los campos')
-    const res = await fetch('/api/manage-admins', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'create', username: newAdminUsername, password: newAdminPassword, gender: newAdminGender }) })
-    const data = await res.json()
-    if (data.error) return toast.error(data.error)
-    toast.success(`Admin ${newAdminUsername} creado`); setNewAdminUsername(''); setNewAdminPassword(''); loadData()
+    // Remover de la cola en Gun
+    leaveVerifyQueue(globalGun, target.peerId)
+
+    // Signal al usuario que el admin se conecto
+    signalVerificationStart(globalGun, target.peerId, globalPeer!.id)
+
+    // Esperar un momento para que el usuario reciba la seal
+    await new Promise((r) => setTimeout(r, 1000))
+
+    // Configurar target y pasar a la vista de verificacion
+    setVerificationTarget({ peerId: target.peerId, username: target.username, gender: target.gender })
+    clearVerificationMessages()
+    useDhobbytvStore.getState().setView('admin-verification')
   }
-  const handleDeleteAdmin = async (username: string) => {
-    const res = await fetch('/api/manage-admins', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'delete', username }) })
-    const data = await res.json()
-    if (data.error) return toast.error(data.error)
-    toast.success(`Admin ${username} eliminado`); loadData()
-  }
-  const handleCreateAnnouncement = async () => {
-    if (!newAnnouncement.trim()) return toast.error('Escribe un anuncio')
-    await fetch('/api/announcements', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: newAnnouncement }) })
-    toast.success('Anuncio publicado'); setNewAnnouncement(''); loadData()
-  }
-  const handleDeleteAnnouncement = async (id: string) => {
-    await fetch('/api/announcements', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'delete', id }) })
-    toast.success('Anuncio eliminado'); loadData()
-  }
+
+  const [banDialog, setBanDialog] = useState<{ userId: string; username: string } | null>(null)
+  const [banReason, setBanReason] = useState('')
+  const [suspendDialog, setSuspendDialog] = useState<{ userId: string; username: string } | null>(null)
+  const [suspendHours, setSuspendHours] = useState('24')
+  const [selectedReportedUser, setSelectedReportedUser] = useState<any>(null)
+
   const handleBan = async () => {
-    if (!banDialog || !banReason) return toast.error('Escribe la razon')
-    const res = await fetch('/api/ban-user', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userId: banDialog.userId, reason: banReason }) })
-    const data = await res.json()
-    if (data.error) return toast.error(data.error)
-    toast.success(`${banDialog.username} baneado`); setBanDialog(null); setBanReason(''); loadData()
+    if (!banDialog) return
+    await fetch('/api/admin-action', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'ban', userId: banDialog.userId, reason: banReason }) })
+    toast.success(`${banDialog.username} baneado`); setBanDialog(null); setBanReason(''); loadAdminData()
+  }
+  const handleUnban = async (userId: string) => {
+    await fetch('/api/admin-action', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'unban', userId }) })
+    toast.success('Desbaneado'); loadAdminData()
   }
   const handleSuspend = async () => {
-    if (!suspendDialog || !suspendHours) return toast.error('Indica las horas')
-    const res = await fetch('/api/suspend-user', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userId: suspendDialog.userId, hours: suspendHours }) })
-    const data = await res.json()
-    if (data.error) return toast.error(data.error)
-    toast.success(`${suspendDialog.username} suspendido por ${suspendHours} horas`); setSuspendDialog(null); setSuspendHours(''); loadData()
+    if (!suspendDialog) return
+    await fetch('/api/admin-action', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'suspend', userId: suspendDialog.userId, hours: Number(suspendHours) }) })
+    toast.success(`${suspendDialog.username} suspendido`); setSuspendDialog(null); loadAdminData()
   }
-  const handleUnban = async (userId: string) => { await fetch('/api/unban-user', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userId, type: 'unban' }) }); toast.success('Desbaneado'); loadData() }
-  const handleUnsuspend = async (userId: string) => { await fetch('/api/unban-user', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userId, type: 'unsuspend' }) }); toast.success('Suspension removida'); loadData() }
-  const handleVerifyUser = async (userId: string, username: string) => {
-    await fetch('/api/pending-users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'verify', userId }) })
-    toast.success(`${username} verificado`); loadData()
+  const handleUnsuspend = async (userId: string) => {
+    await fetch('/api/admin-action', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'unsuspend', userId }) })
+    toast.success('Suspension quitada'); loadAdminData()
   }
-  const handleRejectUser = async (userId: string, username: string) => {
-    await fetch('/api/pending-users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'reject', userId }) })
-    toast.error(`${username} eliminado`); loadData()
-  }
-  const handleCreateAd = async () => {
-    if (!adTitle || !adPosition) return toast.error('Falta titulo y posicion')
-    await fetch('/api/ads', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: adTitle, imageUrl: adImageUrl, linkUrl: adLinkUrl, htmlContent: adHtmlContent, position: adPosition, displayStyle: adDisplayStyle, bgColor: adBgColor, textColor: adTextColor, fontSize: adFontSize, borderRadius: adBorderRadius, showOnLogin: adShowLogin, showOnMain: adShowMain }) })
-    toast.success('Anuncio creado'); setAdTitle(''); setAdImageUrl(''); setAdLinkUrl(''); setAdHtmlContent(''); loadData()
-  }
-  const handleDeleteAd = async (id: string) => { await fetch('/api/ads', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'delete', id }) }); toast.success('Anuncio eliminado'); loadData() }
-  const handleToggleAd = async (id: string) => { await fetch('/api/ads', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'toggle', id }) }); loadData() }
-  const handleLogout = () => { useDhobbytvStore.getState().reset(); useDhobbytvStore.getState().setView('login') }
 
   return (
     <div className="min-h-screen bg-gray-950 text-white">
-      <header className="border-b border-gray-800 px-6 py-4">
+      <header className="border-b border-gray-800 px-4 py-3">
         <div className="flex items-center justify-between max-w-7xl mx-auto">
-          <h1 className="text-2xl font-black"><span className="text-purple-400">dhobby</span><span className="text-green-400">tv</span><span className="text-red-400 text-sm ml-2">SUPER ADMIN</span></h1>
+          <h1 className="text-xl font-black"><span className="text-purple-400">dhobby</span><span className="text-green-400">tv</span><span className="text-blue-400 text-sm ml-2">ADMIN</span></h1>
           <div className="flex items-center gap-3">
-            {pendingUsers.length > 0 && <Badge className="bg-yellow-600 animate-pulse">{pendingUsers.length} pendiente{pendingUsers.length !== 1 ? 's' : ''}</Badge>}
-            <Button variant="outline" className="text-gray-400" onClick={handleLogout}>Salir</Button>
+            <Badge variant="outline" className={gunReady ? 'text-green-400 border-green-400' : 'text-red-400 border-red-400'}>{gunReady ? 'P2P Activo' : 'P2P Inactivo'}</Badge>
+            <Badge variant="outline" className="text-green-400 border-green-400 text-xs">{onlineCount} online</Badge>
+            <Button variant="ghost" size="sm" className="text-gray-400" onClick={() => { cleanupPeer(globalPeer); setGlobalPeer(null); if (globalPeerId && globalGun) goOffline(globalGun, globalPeerId); useDhobbytvStore.getState().reset(); useDhobbytvStore.getState().setView('login') }}>Salir</Button>
           </div>
         </div>
       </header>
       <main className="max-w-7xl mx-auto p-6">
-        {stats && (
-          <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-6">
-            {[{ label: 'Pendientes', value: stats.pendingUsers, color: 'text-yellow-400' },{ label: 'Verificados', value: stats.verifiedUsers, color: 'text-green-400' },{ label: 'Baneados', value: stats.bannedUsers, color: 'text-red-400' },{ label: 'Suspendidos', value: stats.suspendedUsers, color: 'text-orange-400' },{ label: 'Reportes', value: stats.totalReports, color: 'text-yellow-400' }].map((s) => (
-              <Card key={s.label} className="bg-gray-900 border-gray-800"><CardContent className="p-3 text-center"><p className={`text-2xl font-bold ${s.color}`}>{s.value}</p><p className="text-xs text-gray-500">{s.label}</p></CardContent></Card>
-            ))}
-          </div>
-        )}
-        <Tabs value={activeTab} onValueChange={setActiveTab}>
-          <TabsList className="bg-gray-900 mb-6 flex-wrap">
+        <Tabs defaultValue="pending">
+          <TabsList className="bg-gray-900 mb-4">
             <TabsTrigger value="pending" className="data-[state=active]:bg-purple-600">Pendientes ({pendingUsers.length})</TabsTrigger>
-            <TabsTrigger value="admins" className="data-[state=active]:bg-purple-600">Admins</TabsTrigger>
-            <TabsTrigger value="reported" className="data-[state=active]:bg-purple-600">Reportados</TabsTrigger>
-            <TabsTrigger value="announcements" className="data-[state=active]:bg-purple-600">Anuncios</TabsTrigger>
-            <TabsTrigger value="ads-mgmt" className="data-[state=active]:bg-purple-600">Publicidad</TabsTrigger>
+            <TabsTrigger value="video-queue" className="data-[state=active]:bg-purple-600">Video Queue ({verificationQueue.length})</TabsTrigger>
+            <TabsTrigger value="reported" className="data-[state=active]:bg-purple-600">Reportados ({reportedUsers.length})</TabsTrigger>
           </TabsList>
+
           <TabsContent value="pending">
             <Card className="bg-gray-900 border-gray-800">
-              <CardHeader><CardTitle className="text-lg">Usuarios Pendientes ({pendingUsers.length})</CardTitle><CardDescription className="text-gray-400">Puedes verificar directamente o por video (necesita servidor Socket.io activo)</CardDescription></CardHeader>
+              <CardHeader><CardTitle className="text-lg">Pendientes - Verificacion Directa</CardTitle><CardDescription className="text-gray-400">Se actualiza cada 10s. Verifica sin video.</CardDescription></CardHeader>
               <CardContent><ScrollArea className="max-h-[600px]"><div className="space-y-2">
                 {pendingUsers.map((u: any) => { const mA = Math.floor((Date.now() - new Date(u.createdAt).getTime()) / 60000); const isNew = mA < 10; return (
                   <div key={u.id} className={`flex items-center justify-between p-3 rounded-lg border ${isNew ? 'bg-yellow-900/20 border-yellow-800' : 'bg-gray-800 border-gray-700'}`}>
                     <div className="flex items-center gap-3"><span className="text-lg">{getGenderShort(u.gender)}</span><div><div className="flex items-center gap-2"><p className="font-medium text-sm">{u.username}</p>{isNew && <Badge className="bg-yellow-600 text-xs animate-pulse">NUEVO</Badge>}</div><p className="text-xs text-gray-500">{new Date(u.createdAt).toLocaleString()} ({mA < 60 ? `${mA}m` : `${Math.floor(mA / 60)}h`})</p></div></div>
-                    <div className="flex gap-2"><Button size="sm" className="bg-green-600 hover:bg-green-700 text-xs" onClick={() => handleVerifyUser(u.id, u.username)}>Verificar</Button><Button size="sm" className="bg-red-600 hover:bg-red-700 text-xs" onClick={() => handleRejectUser(u.id, u.username)}>Rechazar</Button></div>
-                  </div>)})}
-                {pendingUsers.length === 0 && <p className="text-gray-500 text-center py-8">No hay usuarios pendientes</p>}
+                    <div className="flex gap-2"><Button size="sm" className="bg-green-600 hover:bg-green-700 text-xs" onClick={async () => { await fetch('/api/pending-users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'verify', userId: u.id }) }); toast.success(`${u.username} verificado`); loadAdminData() }}>Verificar</Button><Button size="sm" className="bg-red-600 hover:bg-red-700 text-xs" onClick={async () => { await fetch('/api/pending-users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'reject', userId: u.id }) }); toast.error(`${u.username} eliminado`); loadAdminData() }}>Rechazar</Button></div>
+                  </div>
+                )})}
+                {pendingUsers.length === 0 && <p className="text-gray-500 text-center py-4">No hay pendientes</p>}
               </div></ScrollArea></CardContent>
             </Card>
           </TabsContent>
-          <TabsContent value="admins">
-            <div className="grid md:grid-cols-2 gap-6">
-              <Card className="bg-gray-900 border-gray-800"><CardHeader><CardTitle className="text-lg">Crear Nuevo Admin</CardTitle></CardHeader><CardContent className="space-y-3"><Input placeholder="Usuario" value={newAdminUsername} onChange={(e) => setNewAdminUsername(e.target.value)} className="bg-gray-800 border-gray-600" /><Input placeholder="Contrasena" type="password" value={newAdminPassword} onChange={(e) => setNewAdminPassword(e.target.value)} className="bg-gray-800 border-gray-600" /><div className="grid grid-cols-3 gap-2">{['Hombre', 'Mujer', 'Trans'].map((g) => (<button key={g} onClick={() => setNewAdminGender(g)} className={`py-2 rounded-lg text-xs border ${newAdminGender === g ? 'bg-purple-600 border-purple-500' : 'bg-gray-800 border-gray-600'}`}>{getGenderLabel(g)}</button>))}</div><Button onClick={handleCreateAdmin} className="w-full bg-purple-600 hover:bg-purple-700">Crear Admin</Button></CardContent></Card>
-              <Card className="bg-gray-900 border-gray-800"><CardHeader><CardTitle className="text-lg">Admins ({admins.length})</CardTitle></CardHeader><CardContent><ScrollArea className="max-h-80"><div className="space-y-2">{admins.map((a) => (<div key={a.id} className="flex items-center justify-between p-3 bg-gray-800 rounded-lg"><div className="flex items-center gap-2">{a.isSuperAdmin && <Badge className="bg-red-600">SUPER</Badge>}<span>{getGenderShort(a.gender)} {a.username}</span></div>{!a.isSuperAdmin && <Button size="sm" variant="destructive" onClick={() => handleDeleteAdmin(a.username)}>Eliminar</Button>}</div>))}</div></ScrollArea></CardContent></Card>
-            </div>
-          </TabsContent>
-          <TabsContent value="reported">
-            <Card className="bg-gray-900 border-gray-800"><CardHeader><CardTitle className="text-lg">Reportados ({reportedUsers.length})</CardTitle></CardHeader><CardContent><ScrollArea className="max-h-[600px]"><div className="space-y-2">
-              {reportedUsers.sort((a: any, b: any) => b._count.reports - a._count.reports).map((u) => (
-                <div key={u.id} className={`p-3 rounded-lg border ${u.banned ? 'bg-red-900/20 border-red-800' : u.suspendedUntil && new Date(u.suspendedUntil) > new Date() ? 'bg-orange-900/20 border-orange-800' : 'bg-gray-800 border-gray-700'}`}>
-                  <div className="flex items-center justify-between"><div className="flex items-center gap-3"><span className="text-lg">{getGenderShort(u.gender)}</span><div><p className="font-medium">{u.username}</p><p className="text-xs text-gray-500">{new Date(u.createdAt).toLocaleDateString()}</p></div></div><div className="flex items-center gap-2"><Badge className={u._count.reports >= 3 ? 'bg-red-600 text-white' : 'bg-orange-600 text-white'}>{u._count.reports} reporte{u._count.reports !== 1 ? 's' : ''}</Badge>{u.banned && <Badge className="bg-red-800">BANEADO</Badge>}{u.suspendedUntil && new Date(u.suspendedUntil) > new Date() && <Badge className="bg-orange-600">SUSPENDIDO</Badge>}<Button size="sm" variant="outline" onClick={() => setSelectedReportedUser(selectedReportedUser?.id === u.id ? null : u)}>Ver</Button></div></div>
-                  <div className="flex gap-2 mt-2">{!u.banned && !u.isSuperAdmin && <><Button size="sm" className="bg-red-600 text-xs" onClick={() => setBanDialog({ userId: u.id, username: u.username })}>Banear</Button><Button size="sm" className="bg-orange-600 text-xs" onClick={() => setSuspendDialog({ userId: u.id, username: u.username })}>Suspender</Button></>}{(u.banned || (u.suspendedUntil && new Date(u.suspendedUntil) > new Date())) && <Button size="sm" className="bg-green-600 text-xs" onClick={() => { if (u.banned) handleUnban(u.id); else handleUnsuspend(u.id) }}>{u.banned ? 'Desbanear' : 'Quitar susp.'}</Button>}</div>
-                  {selectedReportedUser?.id === u.id && u.reports.length > 0 && <div className="mt-2 p-2 bg-gray-900 rounded-lg space-y-1">{u.reports.map((r: any) => (<div key={r.id} className="text-xs text-gray-300 flex gap-2"><span className="text-gray-500">{new Date(r.createdAt).toLocaleString()}</span><span>-</span><span>Por: {r.reporter.username}</span><span>-</span><span className="text-yellow-400">{r.reason}</span></div>))}</div>}
-                </div>
-              ))}
-              {reportedUsers.length === 0 && <p className="text-gray-500 text-center py-8">No hay reportados</p>}
-            </div></ScrollArea></CardContent>
+
+          <TabsContent value="video-queue">
+            <Card className="bg-gray-900 border-gray-800">
+              <CardHeader><CardTitle className="text-lg">Cola de Verificacion por Video ({verificationQueue.length})</CardTitle><CardDescription className="text-gray-400">Usuarios esperando verificacion por video P2P via Gun.js + PeerJS</CardDescription></CardHeader>
+              <CardContent>
+                {!gunReady ? (
+                  <div className="text-center py-8 space-y-3"><div className="text-4xl">📡</div><p className="text-gray-400 text-sm">Conectando al P2P...</p></div>
+                ) : verificationQueue.length === 0 ? (
+                  <p className="text-gray-500 text-center py-8">Nadie esperando verificacion por video</p>
+                ) : (
+                  <ScrollArea className="max-h-96"><div className="space-y-2">
+                    {verificationQueue.map((item, i) => { const wM = Math.floor((Date.now() - item.timestamp) / 60000); const wS = Math.floor(((Date.now() - item.timestamp) % 60000) / 1000); return (
+                      <div key={item.peerId} className="flex items-center justify-between p-3 bg-gray-800 rounded-lg">
+                        <div className="flex items-center gap-3"><span className="text-gray-500 text-sm w-6">#{i + 1}</span><span>{getGenderShort(item.gender)}</span><div><p className="font-medium text-sm">{item.username}</p><p className="text-xs text-gray-500">{wM}m {wS}s</p></div></div>
+                        <Button size="sm" className="bg-purple-600 hover:bg-purple-700" onClick={() => handleJoinVerification(item)}>Unirme (P2P)</Button>
+                      </div>
+                    )})}
+                  </div></ScrollArea>
+                )}
+              </CardContent>
             </Card>
           </TabsContent>
-          <TabsContent value="announcements">
-            <div className="grid md:grid-cols-2 gap-6">
-              <Card className="bg-gray-900 border-gray-800"><CardHeader><CardTitle className="text-lg">Crear Anuncio</CardTitle></CardHeader><CardContent className="space-y-3"><textarea className="w-full bg-gray-800 border border-gray-600 rounded-lg p-3 text-white text-sm h-24 resize-none" placeholder="Escribe el anuncio..." value={newAnnouncement} onChange={(e) => setNewAnnouncement(e.target.value)} /><Button onClick={handleCreateAnnouncement} className="w-full bg-green-600 hover:bg-green-700">Publicar</Button></CardContent></Card>
-              <Card className="bg-gray-900 border-gray-800"><CardHeader><CardTitle className="text-lg">Anuncios ({announcements.length})</CardTitle></CardHeader><CardContent><ScrollArea className="max-h-80"><div className="space-y-2">{announcements.map((a: any) => (<div key={a.id} className={`p-3 rounded-lg border ${a.active ? 'bg-green-900/20 border-green-800' : 'bg-gray-800 border-gray-700'}`}><div className="flex items-start justify-between gap-2"><div><p className="text-sm">{a.text}</p><p className="text-xs text-gray-500 mt-1">{new Date(a.createdAt).toLocaleString()}</p>{a.active && <Badge className="mt-1 bg-green-600 text-xs">ACTIVO</Badge>}</div><Button size="sm" variant="destructive" onClick={() => handleDeleteAnnouncement(a.id)}>X</Button></div></div>))}{announcements.length === 0 && <p className="text-gray-500 text-center py-8">No hay anuncios</p>}</div></ScrollArea></CardContent></Card>
-            </div>
-          </TabsContent>
-          <TabsContent value="ads-mgmt">
-            <div className="grid md:grid-cols-2 gap-6">
-              <Card className="bg-gray-900 border-gray-800"><CardHeader><CardTitle className="text-lg">Crear Publicidad</CardTitle><CardDescription className="text-gray-400">Anuncios con estilo personalizado</CardDescription></CardHeader><CardContent className="space-y-3">
-                <Input placeholder="Titulo" value={adTitle} onChange={(e) => setAdTitle(e.target.value)} className="bg-gray-800 border-gray-600" />
-                <Input placeholder="URL de imagen (opcional)" value={adImageUrl} onChange={(e) => setAdImageUrl(e.target.value)} className="bg-gray-800 border-gray-600" />
-                <Input placeholder="URL de enlace (opcional)" value={adLinkUrl} onChange={(e) => setAdLinkUrl(e.target.value)} className="bg-gray-800 border-gray-600" />
-                <textarea className="w-full bg-gray-800 border border-gray-600 rounded-lg p-2 text-white text-xs h-16 resize-none" placeholder="HTML personalizado (opcional)" value={adHtmlContent} onChange={(e) => setAdHtmlContent(e.target.value)} />
-                <div><p className="text-gray-300 text-sm mb-2">Posicion:</p><div className="grid grid-cols-3 gap-2">{[{v:'top',l:'Arriba'},{v:'bottom',l:'Abajo'},{v:'left',l:'Izquierda'},{v:'right',l:'Derecha'},{v:'popup',l:'Popup'},{v:'interstitial',l:'Pantalla completa'}].map(p => (<button key={p.v} onClick={() => setAdPosition(p.v)} className={`py-2 px-3 rounded-lg text-xs border transition-all ${adPosition === p.v ? 'bg-purple-600 border-purple-500 text-white' : 'bg-gray-800 border-gray-600 text-gray-300'}`}>{p.l}</button>))}</div></div>
-                <div><p className="text-gray-300 text-sm mb-2">Estilo:</p><div className="grid grid-cols-2 gap-2">{[{v:'banner',l:'Banner'},{v:'minimal',l:'Minimal'},{v:'neon',l:'Neon'},{v:'wide',l:'Ancho+img'}].map(s => (<button key={s.v} onClick={() => setAdDisplayStyle(s.v)} className={`py-2 px-3 rounded-lg text-xs border transition-all ${adDisplayStyle === s.v ? 'bg-purple-600 border-purple-500 text-white' : 'bg-gray-800 border-gray-600 text-gray-300'}`}>{s.l}</button>))}</div></div>
-                <div className="grid grid-cols-2 gap-3">
-                  <div><p className="text-gray-400 text-xs mb-1">Color fondo</p><div className="flex items-center gap-2"><input type="color" value={adBgColor} onChange={(e) => setAdBgColor(e.target.value)} className="w-8 h-8 rounded cursor-pointer" /><Input value={adBgColor} onChange={(e) => setAdBgColor(e.target.value)} className="bg-gray-800 border-gray-600 text-xs flex-1" /></div></div>
-                  <div><p className="text-gray-400 text-xs mb-1">Color texto</p><div className="flex items-center gap-2"><input type="color" value={adTextColor} onChange={(e) => setAdTextColor(e.target.value)} className="w-8 h-8 rounded cursor-pointer" /><Input value={adTextColor} onChange={(e) => setAdTextColor(e.target.value)} className="bg-gray-800 border-gray-600 text-xs flex-1" /></div></div>
-                </div>
-                <div className="grid grid-cols-2 gap-3">
-                  <div><p className="text-gray-400 text-xs mb-1">Tamano texto</p><div className="flex gap-1">{[{v:'xs',l:'XS'},{v:'sm',l:'S'},{v:'md',l:'M'},{v:'lg',l:'L'},{v:'xl',l:'XL'}].map(f => (<button key={f.v} onClick={() => setAdFontSize(f.v)} className={`flex-1 py-1 text-xs border rounded ${adFontSize === f.v ? 'bg-purple-600 border-purple-500' : 'bg-gray-800 border-gray-600'}`}>{f.l}</button>))}</div></div>
-                  <div><p className="text-gray-400 text-xs mb-1">Bordes</p><div className="flex gap-1">{[{v:'none',l:'No'},{v:'sm',l:'S'},{v:'md',l:'M'},{v:'lg',l:'L'},{v:'xl',l:'XL'},{v:'full',l:'Full'}].map(r => (<button key={r.v} onClick={() => setAdBorderRadius(r.v)} className={`flex-1 py-1 text-xs border rounded ${adBorderRadius === r.v ? 'bg-purple-600 border-purple-500' : 'bg-gray-800 border-gray-600'}`}>{r.l}</button>))}</div></div>
-                </div>
-                <div><p className="text-gray-400 text-xs mb-1">Vista previa:</p><div className="border border-gray-700 rounded-lg p-2 bg-gray-950"><div className={`px-3 py-2 rounded-${adBorderRadius} text-${adFontSize} text-center font-medium`} style={{ backgroundColor: adBgColor, color: adTextColor }}>{adImageUrl ? <img src={adImageUrl} alt="preview" className="max-h-12 rounded mx-auto" /> : adTitle || 'Titulo'}</div></div></div>
-                <div className="flex gap-4"><label className="flex items-center gap-2 text-sm text-gray-300"><input type="checkbox" checked={adShowLogin} onChange={(e) => setAdShowLogin(e.target.checked)} /> Login</label><label className="flex items-center gap-2 text-sm text-gray-300"><input type="checkbox" checked={adShowMain} onChange={(e) => setAdShowMain(e.target.checked)} /> Chat</label></div>
-                <Button onClick={handleCreateAd} className="w-full bg-purple-600 hover:bg-purple-700">Crear Publicidad</Button>
-              </CardContent></Card>
-              <Card className="bg-gray-900 border-gray-800"><CardHeader><CardTitle className="text-lg">Publicidades ({ads.length})</CardTitle></CardHeader><CardContent><ScrollArea className="max-h-[500px]"><div className="space-y-2">{ads.map((a: any) => (<div key={a.id} className={`p-3 rounded-lg border ${a.active ? 'bg-green-900/20 border-green-800' : 'bg-gray-800 border-gray-700'}`}><div className="flex items-start justify-between gap-2"><div className="flex-1"><p className="text-sm font-medium">{a.title}</p><div className="flex gap-2 mt-1 flex-wrap"><Badge variant="outline" className="text-xs">{a.position}</Badge><Badge variant="outline" className="text-xs">{a.displayStyle || 'banner'}</Badge>{a.showOnLogin && <Badge variant="outline" className="text-xs text-blue-400">Login</Badge>}{a.showOnMain && <Badge variant="outline" className="text-xs text-green-400">Chat</Badge>}{a.imageUrl && <span className="text-xs text-gray-500">IMG</span>}</div><div className="flex items-center gap-2 mt-2"><div className="w-4 h-4 rounded" style={{ backgroundColor: a.bgColor || '#6d28d9' }} /><div className="w-4 h-4 rounded border border-gray-600" style={{ backgroundColor: a.textColor || '#fff' }} /></div>{a.imageUrl && <img src={a.imageUrl} alt="" className="mt-2 max-h-16 rounded" />}</div><div className="flex gap-1"><Button size="sm" variant="outline" className={`text-xs ${a.active ? 'text-green-400 border-green-400' : 'text-gray-500'}`} onClick={() => handleToggleAd(a.id)}>{a.active ? 'ON' : 'OFF'}</Button><Button size="sm" variant="destructive" className="text-xs" onClick={() => handleDeleteAd(a.id)}>X</Button></div></div></div>))}{ads.length === 0 && <p className="text-gray-500 text-center py-8">No hay publicidades</p>}</div></ScrollArea></CardContent></Card>
-            </div>
+
+          <TabsContent value="reported">
+            <Card className="bg-gray-900 border-gray-800">
+              <CardHeader><CardTitle className="text-lg">Reportados ({reportedUsers.length})</CardTitle></CardHeader>
+              <CardContent><ScrollArea className="max-h-96"><div className="space-y-2">
+                {reportedUsers.sort((a: any, b: any) => b._count?.reports - a._count?.reports).map((u: any) => (
+                  <div key={u.id} className={`p-3 rounded-lg border ${u.banned ? 'bg-red-900/20 border-red-800' : 'bg-gray-800 border-gray-700'}`}>
+                    <div className="flex items-center justify-between flex-wrap gap-2"><div className="flex items-center gap-3"><span>{getGenderShort(u.gender)}</span><span className="font-medium text-sm">{u.username}</span><Badge className={u._count?.reports >= 3 ? 'bg-red-600 text-white' : 'bg-orange-600 text-white'}>{u._count?.reports} reporte{u._count?.reports !== 1 ? 's' : ''}</Badge>{u.banned && <Badge className="bg-red-800">BANEADO</Badge>}{u.suspendedUntil && new Date(u.suspendedUntil) > new Date() && <Badge className="bg-orange-600">SUSPENDIDO</Badge>}</div><div className="flex gap-2 flex-wrap">{!u.banned && <><Button size="sm" className="bg-red-600 text-xs" onClick={() => setBanDialog({ userId: u.id, username: u.username })}>Banear</Button><Button size="sm" className="bg-orange-600 text-xs" onClick={() => setSuspendDialog({ userId: u.id, username: u.username })}>Suspender</Button></>}{(u.banned || (u.suspendedUntil && new Date(u.suspendedUntil) > new Date())) && <Button size="sm" className="bg-green-600 text-xs" onClick={() => { if (u.banned) handleUnban(u.id); else handleUnsuspend(u.id) }}>{u.banned ? 'Desbanear' : 'Quitar susp.'}</Button>}<Button size="sm" variant="outline" className="text-xs" onClick={() => setSelectedReportedUser(selectedReportedUser?.id === u.id ? null : u)}>Ver</Button></div></div>
+                    {selectedReportedUser?.id === u.id && u.reports?.length > 0 && <div className="mt-2 p-2 bg-gray-900 rounded-lg space-y-1">{u.reports.map((r: any) => (<div key={r.id} className="text-xs text-gray-300 flex gap-2"><span className="text-gray-500">{new Date(r.createdAt).toLocaleString()}</span><span>-</span><span>Por: {r.reporter?.username || 'N/A'}</span><span>-</span><span className="text-yellow-400">{r.reason}</span></div>))}</div>}
+                  </div>
+                ))}
+                {reportedUsers.length === 0 && <p className="text-gray-500 text-center py-8">No hay reportados</p>}
+              </div></ScrollArea></CardContent>
+            </Card>
           </TabsContent>
         </Tabs>
       </main>
@@ -971,139 +931,251 @@ function SuperAdminView() {
   )
 }
 
-// ==================== ADMIN PANEL ====================
-function AdminView() {
+// ==================== SUPER ADMIN VIEW ====================
+function SuperAdminView() {
   const user = useDhobbytvStore((s) => s.user)
   const verificationQueue = useDhobbytvStore((s) => s.verificationQueue)
   const setVerificationQueue = useDhobbytvStore((s) => s.setVerificationQueue)
-  const [stats, setStats] = useState<any>(null)
-  const [reportedUsers, setReportedUsers] = useState<any[]>([])
-  const [selectedReportedUser, setSelectedReportedUser] = useState<any>(null)
-  const [suspendDialog, setSuspendDialog] = useState<{ userId: string; username: string } | null>(null)
-  const [suspendHours, setSuspendHours] = useState('')
-  const [banDialog, setBanDialog] = useState<{ userId: string; username: string } | null>(null)
-  const [banReason, setBanReason] = useState('')
+  const setVerificationTarget = useDhobbytvStore((s) => s.setVerificationTarget)
+  const clearVerificationMessages = useDhobbytvStore((s) => s.clearVerificationMessages)
+
   const [pendingUsers, setPendingUsers] = useState<any[]>([])
-  const [socketConnected, setSocketConnected] = useState(false)
-  const socketRef = useRef<Socket | null>(null)
-  const onlineCount = useDhobbytvStore((s) => s.onlineCount)
+  const [reportedUsers, setReportedUsers] = useState<any[]>([])
+  const [stats, setStats] = useState<any>(null)
+  const [onlineCount, setOnlineCount] = useState(0)
+  const [gunReady, setGunReady] = useState(false)
+  const [announcement, setAnnouncement] = useState('')
 
-  const loadAdminData = useCallback(async () => {
+  const [ads, setAds] = useState<any[]>([])
+  const [adForm, setAdForm] = useState({ title: '', imageUrl: '', linkUrl: '', position: 'top' as string, active: true, showOnLogin: false, showOnMain: true, displayStyle: 'banner' as string, bgColor: '#6d28d9', textColor: '#ffffff', fontSize: 'sm' as string, borderRadius: 'lg' as string, htmlContent: '' })
+  const [editingAdId, setEditingAdId] = useState<string | null>(null)
+
+  const loadAdminData = async () => {
     try {
-      const [s, r, p] = await Promise.all([
-        fetch('/api/admin-stats').then((res) => res.json()),
-        fetch('/api/reported-users').then((res) => res.json()),
-        fetch('/api/pending-users').then((res) => res.json()),
+      const [pendingRes, reportedRes, statsRes] = await Promise.all([
+        fetch('/api/pending-users').then((r) => r.json()),
+        fetch('/api/reported-users').then((r) => r.json()).catch(() => ({ users: [] })),
+        fetch('/api/stats').then((r) => r.json()).catch(() => ({})),
       ])
-      setStats(s); setReportedUsers(r.users || []); setPendingUsers(p.users || [])
-    } catch { /* ignore */ }
-  }, [])
+      if (pendingRes.users) setPendingUsers(pendingRes.users)
+      if (reportedRes.users) setReportedUsers(reportedRes.users)
+      if (statsRes) setStats(statsRes)
+    } catch {}
+  }
 
-  useEffect(() => { loadAdminData() }, [loadAdminData])
-  useEffect(() => { const i = setInterval(loadAdminData, 10000); return () => clearInterval(i) }, [loadAdminData])
+  const loadAds = async () => {
+    try {
+      const res = await fetch('/api/ads?action=list')
+      const data = await res.json()
+      if (data.ads) setAds(data.ads)
+    } catch {}
+  }
 
+  // Gun.js + PeerJS setup para super admin
   useEffect(() => {
-    const socket = io('/?XTransformPort=3003', { transports: ['websocket'], reconnection: true, reconnectionAttempts: 10, reconnectionDelay: 3000 })
-    socketRef.current = socket
-    socket.on('connect', () => { setSocketConnected(true); socket.emit('user-online', { username: user?.username, gender: user?.gender, country: '', countryCode: '', verified: true, isAdmin: true }); socket.emit('get-verification-queue') })
-    socket.on('disconnect', () => setSocketConnected(false))
-    socket.on('verification-queue', (data) => setVerificationQueue(data.queue))
-    socket.on('online-count', (data) => useDhobbytvStore.getState().setOnlineCount(data.count))
-    return () => { socket.disconnect() }
+    let mounted = true
+    let unsubQueue: (() => void) | null = null
+    let unsubOnline: (() => void) | null = null
+
+    const setup = async () => {
+      const gun = await getGun()
+      if (!mounted) return
+      setGlobalGun(gun)
+
+      const peerId = genPeerId(user!.username + '_super')
+      setGlobalPeerId(peerId)
+      const peer = createPeer(peerId)
+      setGlobalPeer(peer)
+
+      peer.on('open', () => {
+        if (!mounted) return
+        setGunReady(true)
+        goOnline(gun, peerId, { username: user!.username, gender: user!.gender, country: '', countryCode: '', verified: true, isAdmin: true })
+      })
+
+      peer.on('error', () => { if (mounted) setGunReady(false) })
+
+      unsubQueue = watchVerifyQueue(gun, (queue) => { if (mounted) setVerificationQueue(queue) })
+      unsubOnline = watchOnlineCount(gun, (count) => { if (mounted) setOnlineCount(count) })
+    }
+
+    setup()
+    loadAdminData()
+    loadAds()
+    const refreshInterval = setInterval(() => { loadAdminData(); loadAds() }, 10000)
+
+    return () => {
+      mounted = false
+      clearInterval(refreshInterval)
+      if (unsubQueue) unsubQueue()
+      if (unsubOnline) unsubOnline()
+      if (globalPeerId && globalGun) goOffline(globalGun, globalPeerId)
+      cleanupPeer(globalPeer)
+      setGlobalPeer(null)
+      setGlobalPeerId(null)
+    }
   }, [])
 
-  const handleJoinVerification = (item: any) => {
-    // Store target and switch to full-screen P2P verification view
-    useDhobbytvStore.getState().setVerificationTarget({ socketId: item.socketId, username: item.username, gender: item.gender })
-    useDhobbytvStore.getState().clearVerificationMessages()
+  const handleJoinVerification = async (target: any) => {
+    if (!globalPeer || !globalGun) { toast.error('P2P no listo'); return }
+    leaveVerifyQueue(globalGun, target.peerId)
+    signalVerificationStart(globalGun, target.peerId, globalPeer!.id)
+    await new Promise((r) => setTimeout(r, 1000))
+    setVerificationTarget({ peerId: target.peerId, username: target.username, gender: target.gender })
+    clearVerificationMessages()
     useDhobbytvStore.getState().setView('admin-verification')
   }
 
-  const handleBan = async () => {
-    if (!banDialog || !banReason) return
-    const res = await fetch('/api/ban-user', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userId: banDialog.userId, reason: banReason }) })
-    const data = await res.json()
-    if (data.error) return toast.error(data.error)
-    toast.success(`${banDialog.username} baneado`); setBanDialog(null); setBanReason(''); loadAdminData()
+  const handleSaveAnnouncement = async () => {
+    await fetch('/api/announcements', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: announcement }) })
+    toast.success('Anuncio guardado')
   }
-  const handleSuspend = async () => {
-    if (!suspendDialog || !suspendHours) return
-    const res = await fetch('/api/suspend-user', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userId: suspendDialog.userId, hours: suspendHours }) })
-    const data = await res.json()
-    if (data.error) return toast.error(data.error)
-    toast.success(`${suspendDialog.username} suspendido`); setSuspendDialog(null); setSuspendHours(''); loadAdminData()
+
+  const handleSaveAd = async () => {
+    const action = editingAdId ? 'update' : 'create'
+    await fetch('/api/ads', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action, id: editingAdId, ...adForm }) })
+    toast.success(editingAdId ? 'Anuncio actualizado' : 'Anuncio creado')
+    setEditingAdId(null)
+    setAdForm({ title: '', imageUrl: '', linkUrl: '', position: 'top', active: true, showOnLogin: false, showOnMain: true, displayStyle: 'banner', bgColor: '#6d28d9', textColor: '#ffffff', fontSize: 'sm', borderRadius: 'lg', htmlContent: '' })
+    loadAds()
   }
-  const handleUnban = async (userId: string) => { await fetch('/api/unban-user', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userId, type: 'unban' }) }); toast.success('Desbaneado'); loadAdminData() }
-  const handleUnsuspend = async (userId: string) => { await fetch('/api/unban-user', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userId, type: 'unsuspend' }) }); toast.success('Suspension quitada'); loadAdminData() }
-  const handleLogout = () => { socketRef.current?.disconnect(); useDhobbytvStore.getState().reset(); useDhobbytvStore.getState().setView('login') }
+
+  const [banDialog, setBanDialog] = useState<{ userId: string; username: string } | null>(null)
+  const [banReason, setBanReason] = useState('')
+  const [suspendDialog, setSuspendDialog] = useState<{ userId: string; username: string } | null>(null)
+  const [suspendHours, setSuspendHours] = useState('24')
+  const [selectedReportedUser, setSelectedReportedUser] = useState<any>(null)
+
+  const handleBan = async () => { if (!banDialog) return; await fetch('/api/admin-action', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'ban', userId: banDialog.userId, reason: banReason }) }); toast.success(`${banDialog.username} baneado`); setBanDialog(null); setBanReason(''); loadAdminData() }
+  const handleUnban = async (userId: string) => { await fetch('/api/admin-action', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'unban', userId }) }); toast.success('Desbaneado'); loadAdminData() }
+  const handleSuspend = async () => { if (!suspendDialog) return; await fetch('/api/admin-action', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'suspend', userId: suspendDialog.userId, hours: Number(suspendHours) }) }); toast.success(`${suspendDialog.username} suspendido`); setSuspendDialog(null); loadAdminData() }
+  const handleUnsuspend = async (userId: string) => { await fetch('/api/admin-action', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'unsuspend', userId }) }); toast.success('Suspension quitada'); loadAdminData() }
 
   return (
     <div className="min-h-screen bg-gray-950 text-white">
-      <header className="border-b border-gray-800 px-6 py-4">
+      <header className="border-b border-gray-800 px-4 py-3">
         <div className="flex items-center justify-between max-w-7xl mx-auto">
-          <h1 className="text-2xl font-black"><span className="text-purple-400">dhobby</span><span className="text-green-400">tv</span><span className="text-blue-400 text-sm ml-2">ADMIN</span></h1>
-          <div className="flex items-center gap-4">
-            <Badge variant="outline" className={socketConnected ? 'text-green-400 border-green-400' : 'text-red-400 border-red-400'}>{socketConnected ? 'Servidor ON' : 'Servidor OFF'}</Badge>
-            <Badge variant="outline" className="text-green-400 border-green-400">{onlineCount} online</Badge>
-            {pendingUsers.length > 0 && <Badge className="bg-yellow-600 animate-pulse">{pendingUsers.length} pendiente{pendingUsers.length !== 1 ? 's' : ''}</Badge>}
-            <Button variant="outline" className="text-gray-400" onClick={handleLogout}>Salir</Button>
+          <h1 className="text-xl font-black"><span className="text-purple-400">dhobby</span><span className="text-green-400">tv</span><span className="text-red-400 text-sm ml-2">SUPER ADMIN</span></h1>
+          <div className="flex items-center gap-3">
+            <Badge variant="outline" className={gunReady ? 'text-green-400 border-green-400' : 'text-red-400 border-red-400'}>{gunReady ? 'P2P Activo' : 'P2P Inactivo'}</Badge>
+            <Badge variant="outline" className="text-green-400 border-green-400 text-xs">{onlineCount} online</Badge>
+            <Button variant="ghost" size="sm" className="text-gray-400" onClick={() => { cleanupPeer(globalPeer); setGlobalPeer(null); if (globalPeerId && globalGun) goOffline(globalGun, globalPeerId); useDhobbytvStore.getState().reset(); useDhobbytvStore.getState().setView('login') }}>Salir</Button>
           </div>
         </div>
       </header>
       <main className="max-w-7xl mx-auto p-6">
         {stats && (<div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-6">{[{ label: 'Total', value: stats.totalUsers, color: 'text-purple-400' },{ label: 'Verificados', value: stats.verifiedUsers, color: 'text-green-400' },{ label: 'Pendientes', value: stats.pendingUsers, color: 'text-yellow-400' },{ label: 'Baneados', value: stats.bannedUsers, color: 'text-red-400' },{ label: 'Reportes', value: stats.totalReports, color: 'text-orange-400' }].map((s) => (<Card key={s.label} className="bg-gray-900 border-gray-800"><CardContent className="p-3 text-center"><p className={`text-2xl font-bold ${s.color}`}>{s.value}</p><p className="text-xs text-gray-500">{s.label}</p></CardContent></Card>))}</div>)}
 
-        {/* Verification Queue */}
-        <Card className="bg-gray-900 border-gray-800">
-          <CardHeader>
-            <CardTitle className="text-lg">Cola de Verificacion por Video ({verificationQueue.length})</CardTitle>
-            {!socketConnected && <CardDescription className="text-red-400">Servidor Socket.io desconectado. La verificacion por video necesita el servidor activo.</CardDescription>}
-          </CardHeader>
-          <CardContent>
-            {!socketConnected ? (
-              <div className="text-center py-8 space-y-3"><div className="text-4xl">📡</div><p className="text-gray-400 text-sm">Servidor de video no conectado</p></div>
-            ) : verificationQueue.length === 0 ? (
-              <p className="text-gray-500 text-center py-8">Nadie esperando verificacion por video</p>
-            ) : (
-              <ScrollArea className="max-h-64"><div className="space-y-2">
-                {verificationQueue.map((item, i) => { const wM = Math.floor((Date.now() - item.joinedAt) / 60000); const wS = Math.floor(((Date.now() - item.joinedAt) % 60000) / 1000); return (
-                  <div key={item.socketId} className="flex items-center justify-between p-3 bg-gray-800 rounded-lg">
-                    <div className="flex items-center gap-3"><span className="text-gray-500 text-sm w-6">#{i + 1}</span><span>{getGenderShort(item.gender)}</span><div><p className="font-medium text-sm">{item.username}</p><p className="text-xs text-gray-500">{wM}m {wS}s</p></div></div>
-                    <Button size="sm" className="bg-purple-600 hover:bg-purple-700" onClick={() => handleJoinVerification(item)}>Unirme (P2P)</Button>
+        <Tabs defaultValue="video-queue">
+          <TabsList className="bg-gray-900 mb-4">
+            <TabsTrigger value="video-queue" className="data-[state=active]:bg-purple-600">Video Queue ({verificationQueue.length})</TabsTrigger>
+            <TabsTrigger value="pending" className="data-[state=active]:bg-purple-600">Pendientes ({pendingUsers.length})</TabsTrigger>
+            <TabsTrigger value="reported" className="data-[state=active]:bg-purple-600">Reportados ({reportedUsers.length})</TabsTrigger>
+            <TabsTrigger value="announcements" className="data-[state=active]:bg-purple-600">Anuncios</TabsTrigger>
+            <TabsTrigger value="ads-mgmt" className="data-[state=active]:bg-purple-600">Publicidad</TabsTrigger>
+          </TabsList>
+
+          <TabsContent value="video-queue">
+            <Card className="bg-gray-900 border-gray-800">
+              <CardHeader><CardTitle className="text-lg">Cola de Verificacion por Video ({verificationQueue.length})</CardTitle><CardDescription className={gunReady ? 'text-gray-400' : 'text-red-400'}>{gunReady ? 'Gun.js + PeerJS activo' : 'Esperando conexion P2P...'}</CardDescription></CardHeader>
+              <CardContent>
+                {!gunReady ? (<div className="text-center py-8 space-y-3"><div className="text-4xl">📡</div><p className="text-gray-400 text-sm">Conectando...</p></div>) : verificationQueue.length === 0 ? (<p className="text-gray-500 text-center py-8">Nadie esperando verificacion por video</p>) : (
+                  <ScrollArea className="max-h-64"><div className="space-y-2">
+                    {verificationQueue.map((item, i) => { const wM = Math.floor((Date.now() - item.timestamp) / 60000); const wS = Math.floor(((Date.now() - item.timestamp) % 60000) / 1000); return (
+                      <div key={item.peerId} className="flex items-center justify-between p-3 bg-gray-800 rounded-lg">
+                        <div className="flex items-center gap-3"><span className="text-gray-500 text-sm w-6">#{i + 1}</span><span>{getGenderShort(item.gender)}</span><div><p className="font-medium text-sm">{item.username}</p><p className="text-xs text-gray-500">{wM}m {wS}s</p></div></div>
+                        <Button size="sm" className="bg-purple-600 hover:bg-purple-700" onClick={() => handleJoinVerification(item)}>Unirme (P2P)</Button>
+                      </div>
+                    )})}
+                  </div></ScrollArea>
+                )}
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          <TabsContent value="pending">
+            <Card className="bg-gray-900 border-gray-800">
+              <CardHeader><CardTitle className="text-lg">Pendientes - Verificacion Directa ({pendingUsers.length})</CardTitle><CardDescription className="text-gray-400">Se actualiza cada 10s. Verifica sin video.</CardDescription></CardHeader>
+              <CardContent><ScrollArea className="max-h-64"><div className="space-y-2">
+                {pendingUsers.map((u: any) => { const mA = Math.floor((Date.now() - new Date(u.createdAt).getTime()) / 60000); const isNew = mA < 10; return (
+                  <div key={u.id} className={`flex items-center justify-between p-3 rounded-lg border ${isNew ? 'bg-yellow-900/20 border-yellow-800' : 'bg-gray-800 border-gray-700'}`}>
+                    <div className="flex items-center gap-3"><span>{getGenderShort(u.gender)}</span><div><div className="flex items-center gap-2"><p className="font-medium text-sm">{u.username}</p>{isNew && <Badge className="bg-yellow-600 text-xs animate-pulse">NUEVO</Badge>}</div><p className="text-xs text-gray-500">{new Date(u.createdAt).toLocaleString()} ({mA < 60 ? `${mA}m` : `${Math.floor(mA / 60)}h`})</p></div></div>
+                    <div className="flex gap-2"><Button size="sm" className="bg-green-600 hover:bg-green-700 text-xs" onClick={async () => { await fetch('/api/pending-users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'verify', userId: u.id }) }); toast.success(`${u.username} verificado`); loadAdminData() }}>Verificar</Button><Button size="sm" className="bg-red-600 hover:bg-red-700 text-xs" onClick={async () => { await fetch('/api/pending-users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'reject', userId: u.id }) }); toast.error(`${u.username} eliminado`); loadAdminData() }}>Rechazar</Button></div>
                   </div>
                 )})}
-              </div></ScrollArea>
-            )}
-          </CardContent>
-        </Card>
+                {pendingUsers.length === 0 && <p className="text-gray-500 text-center py-4">No hay pendientes</p>}
+              </div></ScrollArea></CardContent>
+            </Card>
+          </TabsContent>
 
-        {/* Pending Users (direct verify) */}
-        <Card className="bg-gray-900 border-gray-800 mt-6">
-          <CardHeader><CardTitle className="text-lg">Pendientes - Verificacion Directa ({pendingUsers.length})</CardTitle><CardDescription className="text-gray-400">Se actualiza cada 10s. Verifica sin video.</CardDescription></CardHeader>
-          <CardContent><ScrollArea className="max-h-64"><div className="space-y-2">
-            {pendingUsers.map((u: any) => { const mA = Math.floor((Date.now() - new Date(u.createdAt).getTime()) / 60000); const isNew = mA < 10; return (
-              <div key={u.id} className={`flex items-center justify-between p-3 rounded-lg border ${isNew ? 'bg-yellow-900/20 border-yellow-800' : 'bg-gray-800 border-gray-700'}`}>
-                <div className="flex items-center gap-3"><span>{getGenderShort(u.gender)}</span><div><div className="flex items-center gap-2"><p className="font-medium text-sm">{u.username}</p>{isNew && <Badge className="bg-yellow-600 text-xs animate-pulse">NUEVO</Badge>}</div><p className="text-xs text-gray-500">{new Date(u.createdAt).toLocaleString()} ({mA < 60 ? `${mA}m` : `${Math.floor(mA / 60)}h`})</p></div></div>
-                <div className="flex gap-2"><Button size="sm" className="bg-green-600 hover:bg-green-700 text-xs" onClick={async () => { await fetch('/api/pending-users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'verify', userId: u.id }) }); toast.success(`${u.username} verificado`); loadAdminData() }}>Verificar</Button><Button size="sm" className="bg-red-600 hover:bg-red-700 text-xs" onClick={async () => { await fetch('/api/pending-users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'reject', userId: u.id }) }); toast.error(`${u.username} eliminado`); loadAdminData() }}>Rechazar</Button></div>
-              </div>
-            )})}
-            {pendingUsers.length === 0 && <p className="text-gray-500 text-center py-4">No hay pendientes</p>}
-          </div></ScrollArea></CardContent>
-        </Card>
+          <TabsContent value="reported">
+            <Card className="bg-gray-900 border-gray-800">
+              <CardHeader><CardTitle className="text-lg">Reportados ({reportedUsers.length})</CardTitle></CardHeader>
+              <CardContent><ScrollArea className="max-h-96"><div className="space-y-2">
+                {reportedUsers.sort((a: any, b: any) => (b._count?.reports || 0) - (a._count?.reports || 0)).map((u: any) => (
+                  <div key={u.id} className={`p-3 rounded-lg border ${u.banned ? 'bg-red-900/20 border-red-800' : 'bg-gray-800 border-gray-700'}`}>
+                    <div className="flex items-center justify-between flex-wrap gap-2"><div className="flex items-center gap-3"><span>{getGenderShort(u.gender)}</span><span className="font-medium text-sm">{u.username}</span><Badge className={(u._count?.reports || 0) >= 3 ? 'bg-red-600 text-white' : 'bg-orange-600 text-white'}>{u._count?.reports || 0} reporte{(u._count?.reports || 0) !== 1 ? 's' : ''}</Badge>{u.banned && <Badge className="bg-red-800">BANEADO</Badge>}{u.suspendedUntil && new Date(u.suspendedUntil) > new Date() && <Badge className="bg-orange-600">SUSPENDIDO</Badge>}</div><div className="flex gap-2 flex-wrap">{!u.banned && <><Button size="sm" className="bg-red-600 text-xs" onClick={() => setBanDialog({ userId: u.id, username: u.username })}>Banear</Button><Button size="sm" className="bg-orange-600 text-xs" onClick={() => setSuspendDialog({ userId: u.id, username: u.username })}>Suspender</Button></>}{(u.banned || (u.suspendedUntil && new Date(u.suspendedUntil) > new Date())) && <Button size="sm" className="bg-green-600 text-xs" onClick={() => { if (u.banned) handleUnban(u.id); else handleUnsuspend(u.id) }}>{u.banned ? 'Desbanear' : 'Quitar susp.'}</Button>}<Button size="sm" variant="outline" className="text-xs" onClick={() => setSelectedReportedUser(selectedReportedUser?.id === u.id ? null : u)}>Ver</Button></div></div>
+                    {selectedReportedUser?.id === u.id && u.reports?.length > 0 && <div className="mt-2 p-2 bg-gray-900 rounded-lg space-y-1">{u.reports.map((r: any) => (<div key={r.id} className="text-xs text-gray-300 flex gap-2"><span className="text-gray-500">{new Date(r.createdAt).toLocaleString()}</span><span>-</span><span>Por: {r.reporter?.username || 'N/A'}</span><span>-</span><span className="text-yellow-400">{r.reason}</span></div>))}</div>}
+                  </div>
+                ))}
+                {reportedUsers.length === 0 && <p className="text-gray-500 text-center py-8">No hay reportados</p>}
+              </div></ScrollArea></CardContent>
+            </Card>
+          </TabsContent>
 
-        {/* Reported Users */}
-        <Card className="bg-gray-900 border-gray-800 mt-6">
-          <CardHeader><CardTitle className="text-lg">Reportados ({reportedUsers.length})</CardTitle></CardHeader>
-          <CardContent><ScrollArea className="max-h-96"><div className="space-y-2">
-            {reportedUsers.sort((a: any, b: any) => b._count.reports - a._count.reports).map((u: any) => (
-              <div key={u.id} className={`p-3 rounded-lg border ${u.banned ? 'bg-red-900/20 border-red-800' : 'bg-gray-800 border-gray-700'}`}>
-                <div className="flex items-center justify-between flex-wrap gap-2"><div className="flex items-center gap-3"><span>{getGenderShort(u.gender)}</span><span className="font-medium text-sm">{u.username}</span><Badge className={u._count.reports >= 3 ? 'bg-red-600 text-white' : 'bg-orange-600 text-white'}>{u._count.reports} reporte{u._count.reports !== 1 ? 's' : ''}</Badge>{u.banned && <Badge className="bg-red-800">BANEADO</Badge>}{u.suspendedUntil && new Date(u.suspendedUntil) > new Date() && <Badge className="bg-orange-600">SUSPENDIDO</Badge>}</div><div className="flex gap-2 flex-wrap">{!u.banned && <><Button size="sm" className="bg-red-600 text-xs" onClick={() => setBanDialog({ userId: u.id, username: u.username })}>Banear</Button><Button size="sm" className="bg-orange-600 text-xs" onClick={() => setSuspendDialog({ userId: u.id, username: u.username })}>Suspender</Button></>}{(u.banned || (u.suspendedUntil && new Date(u.suspendedUntil) > new Date())) && <Button size="sm" className="bg-green-600 text-xs" onClick={() => { if (u.banned) handleUnban(u.id); else handleUnsuspend(u.id) }}>{u.banned ? 'Desbanear' : 'Quitar susp.'}</Button>}<Button size="sm" variant="outline" className="text-xs" onClick={() => setSelectedReportedUser(selectedReportedUser?.id === u.id ? null : u)}>Ver</Button></div></div>
-                {selectedReportedUser?.id === u.id && u.reports.length > 0 && <div className="mt-2 p-2 bg-gray-900 rounded-lg space-y-1">{u.reports.map((r: any) => (<div key={r.id} className="text-xs text-gray-300 flex gap-2"><span className="text-gray-500">{new Date(r.createdAt).toLocaleString()}</span><span>-</span><span>Por: {r.reporter.username}</span><span>-</span><span className="text-yellow-400">{r.reason}</span></div>))}</div>}
-              </div>
-            ))}
-            {reportedUsers.length === 0 && <p className="text-gray-500 text-center py-8">No hay reportados</p>}
-          </div></ScrollArea></CardContent>
-        </Card>
+          <TabsContent value="announcements">
+            <Card className="bg-gray-900 border-gray-800">
+              <CardHeader><CardTitle className="text-lg">Anuncio Global</CardTitle></CardHeader>
+              <CardContent className="space-y-3">
+                <Input placeholder="Escribe el anuncio..." value={announcement} onChange={(e) => setAnnouncement(e.target.value)} className="bg-gray-800 border-gray-600" />
+                <Button onClick={handleSaveAnnouncement} className="bg-purple-600 hover:bg-purple-700">Guardar Anuncio</Button>
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          <TabsContent value="ads-mgmt">
+            <Card className="bg-gray-900 border-gray-800">
+              <CardHeader><CardTitle className="text-lg">Gestion de Anuncios ({ads.length})</CardTitle></CardHeader>
+              <CardContent className="space-y-4">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="space-y-3">
+                    <h3 className="font-medium">{editingAdId ? 'Editar Anuncio' : 'Nuevo Anuncio'}</h3>
+                    <Input placeholder="Titulo" value={adForm.title} onChange={(e) => setAdForm({ ...adForm, title: e.target.value })} className="bg-gray-800 border-gray-600" />
+                    <Input placeholder="URL de imagen" value={adForm.imageUrl} onChange={(e) => setAdForm({ ...adForm, imageUrl: e.target.value })} className="bg-gray-800 border-gray-600" />
+                    <Input placeholder="URL de enlace" value={adForm.linkUrl} onChange={(e) => setAdForm({ ...adForm, linkUrl: e.target.value })} className="bg-gray-800 border-gray-600" />
+                    <div className="grid grid-cols-2 gap-2">
+                      <select value={adForm.position} onChange={(e) => setAdForm({ ...adForm, position: e.target.value })} className="bg-gray-800 border-gray-600 text-white rounded-lg p-2 text-sm"><option value="top">Arriba</option><option value="bottom">Abajo</option><option value="side">Lado</option></select>
+                      <select value={adForm.displayStyle} onChange={(e) => setAdForm({ ...adForm, displayStyle: e.target.value })} className="bg-gray-800 border-gray-600 text-white rounded-lg p-2 text-sm"><option value="banner">Banner</option><option value="minimal">Minimal</option><option value="neon">Neon</option><option value="wide">Wide</option></select>
+                    </div>
+                    <div className="flex gap-2 items-center">
+                      <input type="color" value={adForm.bgColor} onChange={(e) => setAdForm({ ...adForm, bgColor: e.target.value })} className="w-8 h-8 rounded cursor-pointer" />
+                      <input type="color" value={adForm.textColor} onChange={(e) => setAdForm({ ...adForm, textColor: e.target.value })} className="w-8 h-8 rounded cursor-pointer" />
+                      <select value={adForm.fontSize} onChange={(e) => setAdForm({ ...adForm, fontSize: e.target.value })} className="bg-gray-800 border-gray-600 text-white rounded p-1 text-xs"><option value="xs">XS</option><option value="sm">SM</option><option value="md">MD</option><option value="lg">LG</option></select>
+                    </div>
+                    <div className="flex gap-2">
+                      <label className="flex items-center gap-1 text-sm"><input type="checkbox" checked={adForm.showOnLogin} onChange={(e) => setAdForm({ ...adForm, showOnLogin: e.target.checked })} /> Login</label>
+                      <label className="flex items-center gap-1 text-sm"><input type="checkbox" checked={adForm.showOnMain} onChange={(e) => setAdForm({ ...adForm, showOnMain: e.target.checked })} /> Main</label>
+                      <label className="flex items-center gap-1 text-sm"><input type="checkbox" checked={adForm.active} onChange={(e) => setAdForm({ ...adForm, active: e.target.checked })} /> Activo</label>
+                    </div>
+                    <Button onClick={handleSaveAd} className="bg-green-600 hover:bg-green-700 w-full">{editingAdId ? 'Actualizar' : 'Crear'} Anuncio</Button>
+                    {editingAdId && <Button variant="outline" onClick={() => { setEditingAdId(null); setAdForm({ title: '', imageUrl: '', linkUrl: '', position: 'top', active: true, showOnLogin: false, showOnMain: true, displayStyle: 'banner', bgColor: '#6d28d9', textColor: '#ffffff', fontSize: 'sm', borderRadius: 'lg', htmlContent: '' }) }}>Cancelar</Button>}
+                  </div>
+                  <div className="space-y-2">
+                    <h3 className="font-medium">Anuncios Existentes</h3>
+                    <ScrollArea className="max-h-96"><div className="space-y-2">
+                      {ads.map((ad: any) => (
+                        <div key={ad.id} className={`p-3 bg-gray-800 rounded-lg border ${ad.active ? 'border-gray-600' : 'border-red-800 opacity-50'}`}>
+                          <div className="flex items-center justify-between"><div><p className="font-medium text-sm">{ad.title || 'Sin titulo'}</p><p className="text-xs text-gray-500">{ad.position} | {ad.displayStyle} | {ad.active ? 'Activo' : 'Inactivo'}</p></div><div className="flex gap-1"><Button size="sm" variant="outline" className="text-xs" onClick={() => { setEditingAdId(ad.id); setAdForm({ title: ad.title, imageUrl: ad.imageUrl, linkUrl: ad.linkUrl, position: ad.position, active: ad.active, showOnLogin: ad.showOnLogin, showOnMain: ad.showOnMain, displayStyle: ad.displayStyle, bgColor: ad.bgColor, textColor: ad.textColor, fontSize: ad.fontSize, borderRadius: ad.borderRadius, htmlContent: ad.htmlContent }) }}>Edit</Button><Button size="sm" variant="outline" className="text-xs" onClick={async () => { await fetch('/api/ads', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'toggle', id: ad.id }) }); loadAds() }}>{ad.active ? 'Off' : 'On'}</Button><Button size="sm" variant="outline" className="text-xs text-red-400" onClick={async () => { await fetch('/api/ads', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'delete', id: ad.id }) }); loadAds() }}>X</Button></div></div>
+                        </div>
+                      ))}
+                      {ads.length === 0 && <p className="text-gray-500 text-center py-4 text-sm">No hay anuncios</p>}
+                    </div></ScrollArea>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          </TabsContent>
+        </Tabs>
       </main>
       <Dialog open={!!banDialog} onOpenChange={() => setBanDialog(null)}><DialogContent className="bg-gray-900 border-gray-700 text-white"><DialogHeader><DialogTitle>Banear a {banDialog?.username}</DialogTitle></DialogHeader><Input placeholder="Razon" value={banReason} onChange={(e) => setBanReason(e.target.value)} className="bg-gray-800 border-gray-600" /><div className="flex gap-3"><Button variant="outline" className="flex-1" onClick={() => setBanDialog(null)}>Cancelar</Button><Button className="flex-1 bg-red-600 hover:bg-red-700" onClick={handleBan}>Banear</Button></div></DialogContent></Dialog>
       <Dialog open={!!suspendDialog} onOpenChange={() => setSuspendDialog(null)}><DialogContent className="bg-gray-900 border-gray-700 text-white"><DialogHeader><DialogTitle>Suspender a {suspendDialog?.username}</DialogTitle></DialogHeader><Input type="number" placeholder="Horas" value={suspendHours} onChange={(e) => setSuspendHours(e.target.value)} className="bg-gray-800 border-gray-600" min="1" /><div className="flex gap-2 flex-wrap">{[1, 6, 24, 72, 168].map((h) => (<Button key={h} size="sm" variant="outline" className={Number(suspendHours) === h ? 'bg-orange-600 border-orange-500' : ''} onClick={() => setSuspendHours(String(h))}>{h}h</Button>))}</div><div className="flex gap-3"><Button variant="outline" className="flex-1" onClick={() => setSuspendDialog(null)}>Cancelar</Button><Button className="flex-1 bg-orange-600 hover:bg-orange-700" onClick={handleSuspend}>Suspender</Button></div></DialogContent></Dialog>
@@ -1111,7 +1183,7 @@ function AdminView() {
   )
 }
 
-// ==================== MAIN VIEW ====================
+// ==================== MAIN VIEW (Gun.js matchmaking + PeerJS video/chat) ====================
 function MainView() {
   const user = useDhobbytvStore((s) => s.user)
   const partner = useDhobbytvStore((s) => s.partner)
@@ -1130,59 +1202,237 @@ function MainView() {
   const setOnlineCount = useDhobbytvStore((s) => s.setOnlineCount)
   const addMessage = useDhobbytvStore((s) => s.addMessage)
   const clearMessages = useDhobbytvStore((s) => s.clearMessages)
-  const socketRef = useRef<Socket | null>(null)
+
   const localVideoRef = useRef<HTMLVideoElement>(null)
   const remoteVideoRef = useRef<HTMLVideoElement>(null)
-  const peerRef = useRef<RTCPeerConnection | null>(null)
-  const dataChannelRef = useRef<RTCDataChannel | null>(null)
-  const localStreamRef = useRef<MediaStream | null>(null)
+  const dataConnRef = useRef<any>(null)
+  const mediaCallRef = useRef<any>(null)
   const [chatInput, setChatInput] = useState('')
   const [showReport, setShowReport] = useState(false)
   const [reportReason, setReportReason] = useState('')
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const [showCountrySelect, setShowCountrySelect] = useState(false)
   const [countrySearch, setCountrySearch] = useState('')
+  const matchedRef = useRef(false)
 
   useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages])
 
-  const createPeerConnection = useCallback((socket: Socket, targetId: string, isInitiator: boolean) => {
-    const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }] })
-    peerRef.current = pc
-    if (isInitiator) { const dc = pc.createDataChannel('chat'); dc.onmessage = (e) => { if (partner) addMessage(partner.username, e.data) }; dc.onopen = () => { dataChannelRef.current = dc }; dataChannelRef.current = dc }
-    else { pc.ondatachannel = (e) => { const dc = e.channel; dc.onmessage = (ev) => { if (partner) addMessage(partner.username, ev.data) }; dc.onopen = () => { dataChannelRef.current = dc }; dataChannelRef.current = dc } }
-    pc.onicecandidate = (e) => { if (e.candidate) socket.emit('webrtc-ice-candidate', { targetId, candidate: e.candidate }) }
-    pc.ontrack = (e) => { if (remoteVideoRef.current) remoteVideoRef.current.srcObject = e.streams[0] }
-    return pc
-  }, [partner, addMessage])
-
+  // Setup Gun.js + PeerJS
   useEffect(() => {
-    const socket = io('/?XTransformPort=3003', { transports: ['websocket'] })
-    socketRef.current = socket
-    socket.on('connect', () => { socket.emit('user-online', { username: user?.username, gender: user?.gender, country, countryCode, verified: true, isAdmin: false }) })
-    socket.on('online-count', (data) => setOnlineCount(data.count))
-    socket.on('searching', () => setSearching(true))
-    socket.on('partner-found', async (data) => {
-      setSearching(false); setPartner(data); clearMessages()
-      addMessage('Sistema', `Conectado con ${data.username} ${getCountryFlag(data.countryCode)} ${data.country}`)
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
-      localStreamRef.current = stream
-      if (localVideoRef.current) localVideoRef.current.srcObject = stream
-      const pc = createPeerConnection(socket, data.peerSocketId, data.signal)
-      stream.getTracks().forEach((track) => pc.addTrack(track, stream))
-      if (data.signal) { const offer = await pc.createOffer(); await pc.setLocalDescription(offer); socket.emit('webrtc-offer', { targetId: data.peerSocketId, offer }) }
-    })
-    socket.on('webrtc-offer', async (data) => { if (!peerRef.current) { const pc = createPeerConnection(socket, data.fromId, false); localStreamRef.current?.getTracks().forEach((track) => pc.addTrack(track, localStreamRef.current!)) } if (peerRef.current) { await peerRef.current.setRemoteDescription(new RTCSessionDescription(data.offer)); const answer = await peerRef.current.createAnswer(); await peerRef.current.setLocalDescription(answer); socket.emit('webrtc-answer', { targetId: data.fromId, answer }) } })
-    socket.on('webrtc-answer', async (data) => { if (peerRef.current) await peerRef.current.setRemoteDescription(new RTCSessionDescription(data.answer)) })
-    socket.on('webrtc-ice-candidate', (data) => { peerRef.current?.addIceCandidate(new RTCIceCandidate(data.candidate)) })
-    socket.on('partner-disconnected', () => { handleNext() })
-    return () => { localStreamRef.current?.getTracks().forEach((t) => t.stop()); peerRef.current?.close(); socket.disconnect() }
+    let mounted = true
+    let unsubOnline: (() => void) | null = null
+    let unsubMatch: (() => void) | null = null
+
+    const setup = async () => {
+      const gun = await getGun()
+      if (!mounted) return
+      setGlobalGun(gun)
+
+      const peerId = genPeerId(user!.username)
+      setGlobalPeerId(peerId)
+      const peer = createPeer(peerId)
+      setGlobalPeer(peer)
+
+      peer.on('open', () => {
+        if (!mounted) return
+        // Registrarse online
+        goOnline(gun, peerId, {
+          username: user!.username, gender: user!.gender,
+          country, countryCode, verified: true, isAdmin: false,
+        })
+      })
+
+      // Escuchar conteo online
+      unsubOnline = watchOnlineCount(gun, (count) => { if (mounted) setOnlineCount(count) })
+
+      // Escuchar llamadas entrantes (cuando otro user nos encuentra)
+      peer.on('call', (call) => {
+        if (!mounted || !globalStream) return
+        call.answer(globalStream)
+        mediaCallRef.current = call
+
+        call.on('stream', (remoteStream: MediaStream) => {
+          if (remoteVideoRef.current && mounted) remoteVideoRef.current.srcObject = remoteStream
+        })
+
+        call.on('close', () => { if (mounted) handleNext() })
+      })
+
+      // Escuchar conexiones de datos entrantes (chat del otro user)
+      peer.on('connection', (conn) => {
+        if (!mounted) return
+        dataConnRef.current = conn
+
+        conn.on('open', () => { setSearching(false) })
+
+        conn.on('data', (raw: any) => {
+          if (!mounted) return
+          try {
+            const msg = typeof raw === 'string' ? JSON.parse(raw) : raw
+            if (msg.type === 'chat') addMessage(partner?.username || 'Otro', msg.text)
+            else if (msg.type === 'partner-info') {
+              setPartner({ peerSocketId: msg.peerId, username: msg.username, gender: msg.gender, country: msg.country, countryCode: msg.countryCode })
+              addMessage('Sistema', `Conectado con ${msg.username} ${getCountryFlag(msg.countryCode)} ${msg.country}`)
+              clearMessages()
+              addMessage('Sistema', `Conectado con ${msg.username} ${getCountryFlag(msg.countryCode)} ${msg.country}`)
+            }
+          } catch { addMessage(partner?.username || 'Otro', String(raw)) }
+        })
+
+        conn.on('close', () => { if (mounted) handleNext() })
+      })
+    }
+
+    setup()
+
+    return () => {
+      mounted = false
+      if (unsubOnline) unsubOnline()
+      if (unsubMatch) unsubMatch()
+      stopStream(globalStream)
+      setGlobalStream(null)
+      if (globalPeerId && globalGun) {
+        leaveSearching(globalGun, globalPeerId)
+        goOffline(globalGun, globalPeerId)
+      }
+      cleanupPeer(globalPeer)
+      setGlobalPeer(null)
+      setGlobalPeerId(null)
+    }
   }, [])
 
-  const handleSearch = () => { if (socketRef.current && user) { clearMessages(); socketRef.current.emit('search-partner', { country: selectedCountry, hobbies }) } }
-  const handleNext = useCallback(() => { if (socketRef.current) { socketRef.current.emit('next-partner'); socketRef.current.emit('stop-searching') } setPartner(null); clearMessages(); setSearching(false); peerRef.current?.close(); peerRef.current = null; dataChannelRef.current = null; localStreamRef.current?.getTracks().forEach((t) => t.stop()); localStreamRef.current = null; if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null; if (localVideoRef.current) localVideoRef.current.srcObject = null }, [setPartner, clearMessages, setSearching])
-  const handleSendMessage = () => { if (!chatInput.trim() || !dataChannelRef.current) return; dataChannelRef.current.send(chatInput); addMessage(user?.username || 'Tu', chatInput); setChatInput('') }
-  const handleReport = async () => { if (!partner || !reportReason || !user) return; await fetch('/api/report', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reportedUsername: partner.username, reporterUsername: user.username, reason: reportReason }) }); toast.success('Reporte enviado'); setShowReport(false); setReportReason(''); handleNext() }
-  const handleLogout = () => { handleNext(); socketRef.current?.disconnect(); useDhobbytvStore.getState().reset(); useDhobbytvStore.getState().setView('login') }
+  const handleSearch = async () => {
+    if (!globalPeer || !globalGun || !user) return
+    clearMessages()
+    setPartner(null)
+    setSearching(true)
+    matchedRef.current = false
+
+    // Obtener camara
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+      setGlobalStream(stream)
+      if (localVideoRef.current) localVideoRef.current.srcObject = stream
+    } catch {
+      toast.error('No se pudo acceder a la camara')
+      setSearching(false)
+      return
+    }
+
+    // Escribir preferencias en Gun.js
+    joinSearching(globalGun, globalPeerId!, {
+      username: user.username, gender: user.gender,
+      country, countryCode, hobbies, countryFilter: selectedCountry,
+    })
+
+    // Buscar match
+    const unsub = watchForMatch(
+      globalGun, globalPeerId!,
+      { countryFilter: selectedCountry, hobbies, gender: user.gender },
+      async (match) => {
+        if (matchedRef.current || !globalPeer || !globalGun) return
+        matchedRef.current = true
+        unsub() // dejar de escuchar
+
+        // Remover ambos de searching
+        leaveSearching(globalGun, globalPeerId!)
+        leaveSearching(globalGun, match.peerId)
+        setSearching(false)
+
+        // Establecer partner info
+        setPartner({
+          peerSocketId: match.peerId,
+          username: match.username,
+          gender: match.gender,
+          country: match.country,
+          countryCode: match.countryCode,
+        })
+        clearMessages()
+        addMessage('Sistema', `Conectado con ${match.username} ${getCountryFlag(match.countryCode)} ${match.country}`)
+
+        // Llamar al match via PeerJS (video)
+        const call = globalPeer.call(match.peerId, globalStream!)
+        mediaCallRef.current = call
+
+        call.on('stream', (remoteStream: MediaStream) => {
+          if (remoteVideoRef.current) remoteVideoRef.current.srcObject = remoteStream
+        })
+
+        call.on('close', () => { if (matchedRef.current) handleNext() })
+
+        // Conectar data channel (chat)
+        const conn = globalPeer.connect(match.peerId, { reliable: true })
+        dataConnRef.current = conn
+
+        conn.on('open', () => {
+          // Enviar info del partner
+          conn.send(JSON.stringify({
+            type: 'partner-info',
+            peerId: globalPeerId,
+            username: user.username, gender: user.gender,
+            country, countryCode,
+          }))
+        })
+
+        conn.on('data', (raw: any) => {
+          try {
+            const msg = typeof raw === 'string' ? JSON.parse(raw) : raw
+            if (msg.type === 'chat') addMessage(match.username, msg.text)
+            else if (msg.type === 'partner-info') {
+              setPartner({ peerSocketId: msg.peerId, username: msg.username, gender: msg.gender, country: msg.country, countryCode: msg.countryCode })
+              clearMessages()
+              addMessage('Sistema', `Conectado con ${msg.username} ${getCountryFlag(msg.countryCode)} ${msg.country}`)
+            }
+          } catch { addMessage(match.username, String(raw)) }
+        })
+
+        conn.on('close', () => { if (matchedRef.current) handleNext() })
+      }
+    )
+  }
+
+  const handleNext = useCallback(() => {
+    matchedRef.current = false
+    setPartner(null)
+    clearMessages()
+    setSearching(false)
+    try { dataConnRef.current?.close() } catch {}
+    try { mediaCallRef.current?.close() } catch {}
+    dataConnRef.current = null
+    mediaCallRef.current = null
+    stopStream(globalStream)
+    setGlobalStream(null)
+    if (globalPeerId && globalGun) leaveSearching(globalGun, globalPeerId)
+    if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null
+    if (localVideoRef.current) localVideoRef.current.srcObject = null
+  }, [setPartner, clearMessages, setSearching])
+
+  const handleSendMessage = () => {
+    if (!chatInput.trim() || !dataConnRef.current) return
+    dataConnRef.current.send(JSON.stringify({ type: 'chat', text: chatInput }))
+    addMessage(user?.username || 'Tu', chatInput)
+    setChatInput('')
+  }
+
+  const handleReport = async () => {
+    if (!partner || !reportReason || !user) return
+    await fetch('/api/report', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reportedUsername: partner.username, reporterUsername: user.username, reason: reportReason }) })
+    toast.success('Reporte enviado')
+    setShowReport(false)
+    setReportReason('')
+    handleNext()
+  }
+
+  const handleLogout = () => {
+    handleNext()
+    if (globalPeerId && globalGun) goOffline(globalGun, globalPeerId)
+    cleanupPeer(globalPeer)
+    setGlobalPeer(null)
+    setGlobalPeerId(null)
+    useDhobbytvStore.getState().reset()
+    useDhobbytvStore.getState().setView('login')
+  }
+
   const filteredCountries = COUNTRIES.filter((c) => c.code === 'all' || c.name.toLowerCase().includes(countrySearch.toLowerCase()))
 
   return (

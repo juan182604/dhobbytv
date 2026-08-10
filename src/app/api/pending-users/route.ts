@@ -40,7 +40,14 @@ export async function POST(request: Request) {
       await setVerified(user.id)
       return NextResponse.json({ success: true })
     }
-    return NextResponse.json({ error: 'Acción no válida' }, { status: 400 })
+    if (action === 'reject-username' && username) {
+      const supabase = getSupabaseClient()
+      const { data: user } = await supabase.from('user').select('id').eq('username', username).single()
+      if (!user) return NextResponse.json({ error: 'Usuario no encontrado' }, { status: 404 })
+      await deleteUser(user.id)
+      return NextResponse.json({ success: true })
+    }
+    return NextResponse.json({ error: 'Accion no valida' }, { status: 400 })
   } catch (e) {
     return NextResponse.json({ error: String(e) }, { status: 500 })
   }
