@@ -1,24 +1,17 @@
-# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
-
 # dependencies
-node_modules
-/.pnp
-.pnp.*
-.yarn/*
-!.yarn/patches
-!.yarn/plugins
-!.yarn/releases
-!.yarn/versions
+node_modules/
+.pnp
+.pnp.js
 
 # testing
-/coverage
+coverage/
 
 # next.js
-/.next/
-/out/
+.next/
+out/
 
 # production
-/build
+build/
 
 # misc
 .DS_Store
@@ -28,27 +21,65 @@ node_modules
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
-.pnpm-debug.log*
+pnpm-debug.log*
 
-# env files (can opt-in for committing if needed)
-.env*
+# env files
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
 
 # vercel
 .vercel
 
-
 # typescript
 *.tsbuildinfo
 next-env.d.ts
-local-*
-.claude
-.z-ai-config
+
+# prisma
+db/*.db
+db/*.db-journal
+
+# ide
+.vscode/
+.idea/
+
+# logs
 *.log
 dev.log
-dev.out.log
-test
-prompt
-
 server.log
-# Skills directory
-/skills/
+
+# tool results
+tool-results/
+
+# mini-services (deployed separately)
+mini-services/node_modules/
+mini-services/.next/
+
+# download (user artifacts, don't commit)
+download/
+
+# scripts (generated, don't commit)
+scripts/
+
+# worklog
+worklog.md
+
+# tests
+tests/
+
+# examples
+examples/
+
+# bun
+bun.lock
+
+# caddy
+Caddyfile
+
+# skills (internal, not part of dhobbytv)
+skills/
+
+# components (shadcn raw sources, keep built ones in src/)
+components.json
