@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 
-export type AppView = 'login' | 'register' | 'verification' | 'verification-waiting' | 'verification-video' | 'admin' | 'super-admin' | 'main' | 'chat'
+export type AppView = 'login' | 'register' | 'verification-pending' | 'verification' | 'verification-video' | 'admin' | 'admin-verification' | 'super-admin' | 'main' | 'chat'
 
 interface UserInfo {
   id: string
@@ -17,6 +17,12 @@ interface PartnerInfo {
   gender: string
   country: string
   countryCode: string
+}
+
+interface VerificationTarget {
+  socketId: string
+  username: string
+  gender: string
 }
 
 interface DhobbytvState {
@@ -36,6 +42,8 @@ interface DhobbytvState {
     joinedAt: number
   }>
   verificationAdminSocketId: string | null
+  verificationTarget: VerificationTarget | null
+  verificationMessages: Array<{ from: string; text: string; time: string }>
   messages: Array<{ from: string; text: string; time: string }>
   announcement: string | null
 
@@ -49,8 +57,11 @@ interface DhobbytvState {
   setOnlineCount: (count: number) => void
   setVerificationQueue: (queue: DhobbytvState['verificationQueue']) => void
   setVerificationAdminSocketId: (id: string | null) => void
+  setVerificationTarget: (target: VerificationTarget | null) => void
   addMessage: (from: string, text: string) => void
+  addVerificationMessage: (from: string, text: string) => void
   clearMessages: () => void
+  clearVerificationMessages: () => void
   setAnnouncement: (text: string | null) => void
   reset: () => void
 }
@@ -67,6 +78,8 @@ const initialState = {
   onlineCount: 0,
   verificationQueue: [],
   verificationAdminSocketId: null,
+  verificationTarget: null as VerificationTarget | null,
+  verificationMessages: [] as Array<{ from: string; text: string; time: string }>,
   messages: [],
   announcement: null as string | null,
 }
@@ -88,11 +101,17 @@ export const useDhobbytvStore = create<DhobbytvState>((set) => ({
   setOnlineCount: (count) => set({ onlineCount: count }),
   setVerificationQueue: (queue) => set({ verificationQueue: queue }),
   setVerificationAdminSocketId: (id) => set({ verificationAdminSocketId: id }),
+  setVerificationTarget: (target) => set({ verificationTarget: target }),
   addMessage: (from, text) =>
     set((state) => ({
       messages: [...state.messages, { from, text, time: new Date().toLocaleTimeString() }],
     })),
+  addVerificationMessage: (from, text) =>
+    set((state) => ({
+      verificationMessages: [...state.verificationMessages, { from, text, time: new Date().toLocaleTimeString() }],
+    })),
   clearMessages: () => set({ messages: [] }),
+  clearVerificationMessages: () => set({ verificationMessages: [] }),
   setAnnouncement: (text) => set({ announcement: text }),
   reset: () => set(initialState),
 }))
