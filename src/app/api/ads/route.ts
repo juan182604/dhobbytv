@@ -6,9 +6,16 @@ export async function GET(request: Request) {
     const supabase = getSupabaseClient()
     const { searchParams } = new URL(request.url)
     const position = searchParams.get('position')
-    const context = searchParams.get('context') // 'login' or 'main'
+    const context = searchParams.get('context')
+    const action = searchParams.get('action')
 
-    let query = supabase.from('ad').select('*').eq('active', true).order('createdAt', { ascending: false })
+    if (action === 'list') {
+      const { data, error } = await supabase.from('ad').select('*').order('"createdAt"', { ascending: false })
+      if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+      return NextResponse.json({ ads: data || [] })
+    }
+
+    let query = supabase.from('ad').select('*').eq('active', true).order('"createdAt"', { ascending: false })
 
     if (position) query = query.eq('position', position)
     if (context === 'login') query = query.eq('showOnLogin', true)
@@ -26,7 +33,7 @@ export async function POST(request: Request) {
   try {
     const supabase = getSupabaseClient()
     const body = await request.json()
-    const { action, id, title, imageUrl, linkUrl, htmlContent, position, active, showOnLogin, showOnMain } = body
+    const { action, id, title, imageUrl, linkUrl, htmlContent, position, active, showOnLogin, showOnMain, displayStyle, bgColor, textColor, fontSize, borderRadius } = body
 
     if (action === 'delete') {
       const { error } = await supabase.from('ad').delete().eq('id', id)
@@ -52,17 +59,31 @@ export async function POST(request: Request) {
       if (active !== undefined) updates.active = active
       if (showOnLogin !== undefined) updates.showOnLogin = showOnLogin
       if (showOnMain !== undefined) updates.showOnMain = showOnMain
+      if (displayStyle !== undefined) updates.displayStyle = displayStyle
+      if (bgColor !== undefined) updates.bgColor = bgColor
+      if (textColor !== undefined) updates.textColor = textColor
+      if (fontSize !== undefined) updates.fontSize = fontSize
+      if (borderRadius !== undefined) updates.borderRadius = borderRadius
       const { error } = await supabase.from('ad').update(updates).eq('id', id)
       if (error) return NextResponse.json({ error: error.message }, { status: 500 })
       return NextResponse.json({ success: true })
     }
 
     // Create new ad
-    if (!title || !position) return NextResponse.json({ error: 'Falta título y posición' }, { status: 400 })
+    if (!title || !position) return NextResponse.json({ error: 'Falta titulo y posicion' }, { status: 400 })
     const { error } = await supabase.from('ad').insert({
-      title, imageUrl: imageUrl || null, linkUrl: linkUrl || null,
-      htmlContent: htmlContent || null, position,
-      showOnLogin: showOnLogin ?? false, showOnMain: showOnMain ?? true,
+      title,
+      imageUrl: imageUrl || null,
+      linkUrl: linkUrl || null,
+      htmlContent: htmlContent || null,
+      position,
+      displayStyle: displayStyle || 'banner',
+      bgColor: bgColor || '#6d28d9',
+      textColor: textColor || '#ffffff',
+      fontSize: fontSize || 'sm',
+      borderRadius: borderRadius || 'lg',
+      showOnLogin: showOnLogin ?? false,
+      showOnMain: showOnMain ?? true,
       active: active ?? true,
     })
     if (error) return NextResponse.json({ error: error.message }, { status: 500 })

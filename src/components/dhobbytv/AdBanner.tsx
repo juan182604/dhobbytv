@@ -10,7 +10,29 @@ interface Ad {
   linkUrl: string | null
   htmlContent: string | null
   position: string
+  displayStyle: string
+  bgColor: string
+  textColor: string
+  fontSize: string
+  borderRadius: string
   active: boolean
+}
+
+const fontSizeMap: Record<string, string> = {
+  xs: 'text-xs',
+  sm: 'text-sm',
+  md: 'text-base',
+  lg: 'text-lg',
+  xl: 'text-xl',
+}
+
+const radiusMap: Record<string, string> = {
+  none: 'rounded-none',
+  sm: 'rounded-sm',
+  md: 'rounded-md',
+  lg: 'rounded-lg',
+  xl: 'rounded-xl',
+  full: 'rounded-full',
 }
 
 export function AdBanner({ position, context = 'main', className = '' }: { position: string; context?: string; className?: string }) {
@@ -30,7 +52,7 @@ export function AdBanner({ position, context = 'main', className = '' }: { posit
       {visible.map(ad => (
         <div key={ad.id} className="relative group">
           {ad.linkUrl ? (
-            <a href={ad.linkUrl} target="_blank" rel="noopener noreferrer">
+            <a href={ad.linkUrl} target="_blank" rel="noopener noreferrer" className="block">
               <AdContent ad={ad} />
             </a>
           ) : (
@@ -49,21 +71,56 @@ export function AdBanner({ position, context = 'main', className = '' }: { posit
 }
 
 function AdContent({ ad }: { ad: Ad }) {
+  const textStyle = fontSizeMap[ad.fontSize] || 'text-sm'
+  const radiusStyle = radiusMap[ad.borderRadius] || 'rounded-lg'
+
+  // Image-based ad
   if (ad.imageUrl) {
+    if (ad.displayStyle === 'wide') {
+      return (
+        <div className={`overflow-hidden ${radiusStyle}`} style={{ backgroundColor: ad.bgColor }}>
+          <div className="flex items-center gap-3 px-4 py-2">
+            <img src={ad.imageUrl} alt={ad.title} className="h-12 w-12 rounded object-cover shrink-0" loading="lazy" />
+            <p className={`${textStyle} font-medium truncate`} style={{ color: ad.textColor }}>{ad.title}</p>
+          </div>
+        </div>
+      )
+    }
     return (
-      <div className="overflow-hidden rounded-lg">
+      <div className={`overflow-hidden ${radiusStyle}`} style={{ backgroundColor: ad.bgColor }}>
         <img src={ad.imageUrl} alt={ad.title} className="w-full h-auto object-contain max-h-24" loading="lazy" />
       </div>
     )
   }
+
+  // HTML content ad
   if (ad.htmlContent) {
     return (
-      <div className="p-2 bg-gray-800/50 rounded-lg text-xs text-gray-300" dangerouslySetInnerHTML={{ __html: ad.htmlContent }} />
+      <div className={`p-2 ${radiusStyle} text-xs`} style={{ backgroundColor: ad.bgColor + '80', color: ad.textColor }} dangerouslySetInnerHTML={{ __html: ad.htmlContent }} />
     )
   }
+
+  // Gradient/styled text ad
+  if (ad.displayStyle === 'minimal') {
+    return (
+      <div className={`px-3 py-1.5 ${radiusStyle} border border-white/10`} style={{ backgroundColor: ad.bgColor }}>
+        <p className={`${textStyle} font-medium text-center`} style={{ color: ad.textColor }}>{ad.title}</p>
+      </div>
+    )
+  }
+
+  if (ad.displayStyle === 'neon') {
+    return (
+      <div className={`px-4 py-2 ${radiusStyle} border`} style={{ backgroundColor: ad.bgColor, borderColor: ad.textColor + '60', boxShadow: `0 0 10px ${ad.bgColor}80, 0 0 20px ${ad.bgColor}40` }}>
+        <p className={`${textStyle} font-bold text-center`} style={{ color: ad.textColor, textShadow: `0 0 8px ${ad.textColor}60` }}>{ad.title}</p>
+      </div>
+    )
+  )
+
+  // Default banner style
   return (
-    <div className="p-3 bg-gradient-to-r from-purple-900/50 to-blue-900/50 rounded-lg text-center">
-      <p className="text-purple-300 text-sm font-medium">{ad.title}</p>
+    <div className={`p-3 bg-gradient-to-r from-purple-900/50 to-blue-900/50 ${radiusStyle} text-center`} style={{ backgroundColor: ad.bgColor }}>
+      <p className={`${textStyle} font-medium`} style={{ color: ad.textColor }}>{ad.title}</p>
     </div>
   )
 }
@@ -101,12 +158,12 @@ export function AdPopup({ context = 'main' }: { context?: string }) {
           {ad.linkUrl ? (
             <a href={ad.linkUrl} target="_blank" rel="noopener noreferrer">
               {ad.imageUrl ? <img src={ad.imageUrl} alt={ad.title} className="w-full rounded-lg" /> : null}
-              {!ad.imageUrl && <div className="p-6 text-center"><p className="text-white font-medium">{ad.title}</p></div>}
+              {!ad.imageUrl && <div className="p-6 text-center"><p className="text-white font-medium" style={{ color: ad.textColor || '#fff' }}>{ad.title}</p></div>}
             </a>
           ) : (
             <>
               {ad.imageUrl ? <img src={ad.imageUrl} alt={ad.title} className="w-full rounded-lg" /> : null}
-              {!ad.imageUrl && <div className="p-6 text-center"><p className="text-white font-medium">{ad.title}</p></div>}
+              {!ad.imageUrl && <div className="p-6 text-center" style={{ backgroundColor: ad.bgColor }}><p className="font-medium" style={{ color: ad.textColor || '#fff' }}>{ad.title}</p></div>}
             </>
           )}
         </div>
