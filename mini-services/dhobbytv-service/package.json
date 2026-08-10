@@ -1,10 +1,19 @@
 {
-  "name": "dhobbytv-service",
+  "name": "dhobbytv-socket-service",
   "version": "1.0.0",
+  "description": "DhobbyTV Socket.io service - Matchmaking & WebRTC signaling",
+  "main": "index.js",
   "scripts": {
-    "dev": "bun --hot index.ts"
+    "start": "node index.js",
+    "dev": "ts-node index.ts"
+  },
+  "engines": {
+    "node": ">=18"
   },
   "dependencies": {
     "socket.io": "^4.8.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20"
   }
 }

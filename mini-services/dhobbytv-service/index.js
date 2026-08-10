@@ -1,51 +1,28 @@
-import { createServer } from 'http'
-import { Server } from 'socket.io'
+const { createServer } = require('http')
+const { Server } = require('socket.io')
 
 const httpServer = createServer()
 const io = new Server(httpServer, {
   path: '/',
   cors: {
-    origin: "*",
-    methods: ["GET", "POST"]
+    origin: '*',
+    methods: ['GET', 'POST']
   },
   pingTimeout: 60000,
   pingInterval: 25000,
 })
 
-// Types
-interface OnlineUser {
-  socketId: string
-  username: string
-  gender: string
-  country: string
-  countryCode: string
-  hobbies: string[]
-  verified: boolean
-  isAdmin: boolean
-  searching: boolean
-  pairedWith: string | null
-  inVerification: boolean
-}
-
-interface VerificationQueueItem {
-  socketId: string
-  username: string
-  gender: string
-  joinedAt: number
-}
-
 // State
-const onlineUsers = new Map<string, OnlineUser>()
-const verificationQueue: VerificationQueueItem[] = []
-const activeVerifications = new Map<string, string>() // adminSocketId -> userSocketId
+const onlineUsers = new Map()
+const verificationQueue = []
+const activeVerifications = new Map()
 
-// ==================== CONNECTION ====================
 io.on('connection', (socket) => {
   console.log(`[connect] ${socket.id}`)
 
   // ==================== USER GOES ONLINE ====================
-  socket.on('user-online', (data: { username: string; gender: string; country: string; countryCode: string; verified: boolean; isAdmin: boolean }) => {
-    const user: OnlineUser = {
+  socket.on('user-online', (data) => {
+    const user = {
       socketId: socket.id,
       username: data.username,
       gender: data.gender,
@@ -64,7 +41,7 @@ io.on('connection', (socket) => {
   })
 
   // ==================== SEARCH FOR PARTNER ====================
-  socket.on('search-partner', (data: { country: string; hobbies: string[] }) => {
+  socket.on('search-partner', (data) => {
     const user = onlineUsers.get(socket.id)
     if (!user || !user.verified || user.pairedWith) return
 
@@ -72,8 +49,7 @@ io.on('connection', (socket) => {
     user.hobbies = data.hobbies || []
     user.pairedWith = null
 
-    // Find a matching partner
-    let bestMatch: OnlineUser | null = null
+    let bestMatch = null
     let bestScore = -1
 
     for (const [, candidate] of onlineUsers) {
@@ -91,7 +67,7 @@ io.on('connection', (socket) => {
       if (data.country === 'all' || candidate.countryCode === data.country || data.country === candidate.countryCode) {
         if (data.country !== 'all') score += 10
       } else if (data.country !== 'all') {
-        continue // Skip if country filter doesn't match
+        continue
       }
 
       // Hobby match
@@ -100,7 +76,6 @@ io.on('connection', (socket) => {
         score += common.length * 5
       }
 
-      // Prefer longer waiting
       score += 1
 
       if (score > bestScore) {
@@ -110,13 +85,11 @@ io.on('connection', (socket) => {
     }
 
     if (bestMatch) {
-      // Pair them
       user.searching = false
       user.pairedWith = bestMatch.socketId
       bestMatch.searching = false
       bestMatch.pairedWith = socket.id
 
-      // Notify both
       socket.emit('partner-found', {
         peerSocketId: bestMatch.socketId,
         username: bestMatch.username,
@@ -126,7 +99,7 @@ io.on('connection', (socket) => {
         signal: true,
       })
 
-      bestMatch.socket && io.to(bestMatch.socketId).emit('partner-found', {
+      io.to(bestMatch.socketId).emit('partner-found', {
         peerSocketId: socket.id,
         username: user.username,
         gender: user.gender,
@@ -142,21 +115,21 @@ io.on('connection', (socket) => {
   })
 
   // ==================== WEBRTC SIGNALING ====================
-  socket.on('webrtc-offer', (data: { targetId: string; offer: RTCSessionDescriptionInit }) => {
+  socket.on('webrtc-offer', (data) => {
     io.to(data.targetId).emit('webrtc-offer', {
       fromId: socket.id,
       offer: data.offer,
     })
   })
 
-  socket.on('webrtc-answer', (data: { targetId: string; answer: RTCSessionDescriptionInit }) => {
+  socket.on('webrtc-answer', (data) => {
     io.to(data.targetId).emit('webrtc-answer', {
       fromId: socket.id,
       answer: data.answer,
     })
   })
 
-  socket.on('webrtc-ice-candidate', (data: { targetId: string; candidate: RTCIceCandidateInit }) => {
+  socket.on('webrtc-ice-candidate', (data) => {
     io.to(data.targetId).emit('webrtc-ice-candidate', {
       fromId: socket.id,
       candidate: data.candidate,
@@ -191,20 +164,19 @@ io.on('connection', (socket) => {
   })
 
   // ==================== REPORT USER ====================
-  socket.on('report-user', (data: { targetUsername: string; reason: string }) => {
+  socket.on('report-user', (data) => {
     const user = onlineUsers.get(socket.id)
     if (!user) return
     console.log(`[report] ${user.username} reported ${data.targetUsername}: ${data.reason}`)
-    // Reports are stored via API, this is just for real-time notification
   })
 
   // ==================== VERIFICATION QUEUE ====================
-  socket.on('join-verification-queue', (data: { username: string; gender: string }) => {
+  socket.on('join-verification-queue', (data) => {
     const user = onlineUsers.get(socket.id)
     if (!user) return
 
     user.inVerification = true
-    const queueItem: VerificationQueueItem = {
+    const queueItem = {
       socketId: socket.id,
       username: data.username,
       gender: data.gender,
@@ -212,7 +184,6 @@ io.on('connection', (socket) => {
     }
     verificationQueue.push(queueItem)
 
-    // Notify all admins
     broadcastVerificationQueue()
     socket.emit('in-verification-queue', { position: verificationQueue.length })
     console.log(`[verify-queue] ${data.username} joined queue (position ${verificationQueue.length})`)
@@ -226,7 +197,7 @@ io.on('connection', (socket) => {
   })
 
   // ==================== ADMIN: JOIN VERIFICATION ====================
-  socket.on('admin-join-verification', (data: { userSocketId: string }) => {
+  socket.on('admin-join-verification', (data) => {
     const admin = onlineUsers.get(socket.id)
     if (!admin || !admin.isAdmin) return
 
@@ -236,17 +207,14 @@ io.on('connection', (socket) => {
     const targetUser = onlineUsers.get(data.userSocketId)
     if (!targetUser) return
 
-    // Remove from queue
     verificationQueue.splice(queueIndex, 1)
     activeVerifications.set(socket.id, data.userSocketId)
 
-    // Notify user to start P2P
     io.to(data.userSocketId).emit('start-verification', {
       adminSocketId: socket.id,
       signal: true,
     })
 
-    // Notify admin
     socket.emit('start-verification', {
       userSocketId: data.userSocketId,
       username: targetUser.username,
@@ -259,7 +227,7 @@ io.on('connection', (socket) => {
   })
 
   // ==================== ADMIN: ACCEPT VERIFICATION ====================
-  socket.on('admin-accept-verification', (data: { userSocketId: string }) => {
+  socket.on('admin-accept-verification', (data) => {
     const admin = onlineUsers.get(socket.id)
     if (!admin || !admin.isAdmin) return
 
@@ -276,7 +244,7 @@ io.on('connection', (socket) => {
   })
 
   // ==================== ADMIN: REJECT VERIFICATION ====================
-  socket.on('admin-reject-verification', (data: { userSocketId: string }) => {
+  socket.on('admin-reject-verification', (data) => {
     const admin = onlineUsers.get(socket.id)
     if (!admin || !admin.isAdmin) return
 
@@ -296,7 +264,6 @@ io.on('connection', (socket) => {
     const user = onlineUsers.get(socket.id)
     if (!user) return
 
-    // Notify partner if paired
     if (user.pairedWith) {
       const partner = onlineUsers.get(user.pairedWith)
       if (partner) {
@@ -306,14 +273,12 @@ io.on('connection', (socket) => {
       }
     }
 
-    // Remove from verification queue
     const qIndex = verificationQueue.findIndex(q => q.socketId === socket.id)
     if (qIndex !== -1) {
       verificationQueue.splice(qIndex, 1)
       broadcastVerificationQueue()
     }
 
-    // Remove from active verifications
     for (const [adminId, userId] of activeVerifications) {
       if (userId === socket.id) {
         io.to(adminId).emit('verification-user-disconnected', {})
@@ -335,12 +300,12 @@ io.on('connection', (socket) => {
   })
 })
 
-function getSortedQueue(): VerificationQueueItem[] {
+function getSortedQueue() {
   return [...verificationQueue].sort((a, b) => a.joinedAt - b.joinedAt)
 }
 
 function broadcastVerificationQueue() {
- const sorted = getSortedQueue()
+  const sorted = getSortedQueue()
   for (const [, user] of onlineUsers) {
     if (user.isAdmin) {
       io.to(user.socketId).emit('verification-queue', { queue: sorted })
@@ -348,7 +313,7 @@ function broadcastVerificationQueue() {
   }
 }
 
-const PORT = 3003
+const PORT = process.env.PORT || 3003
 httpServer.listen(PORT, () => {
   console.log(`dhobbytv service running on port ${PORT}`)
 })
