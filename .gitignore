@@ -83,3 +83,4 @@ skills/
 
 # components (shadcn raw sources, keep built ones in src/)
 components.json
+.env*
