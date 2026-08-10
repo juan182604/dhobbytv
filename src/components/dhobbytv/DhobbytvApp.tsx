@@ -18,6 +18,7 @@ import {
   DialogDescription,
 } from '@/components/ui/dialog'
 import { Toaster, toast } from 'sonner'
+import { AdBanner, AdPopup } from './AdBanner'
 
 // ==================== LOGIN ====================
 function LoginView() {
@@ -65,6 +66,7 @@ function LoginView() {
 
   return (
     <div className="min-h-screen flex items-center justify-center p-4 bg-gradient-to-br from-purple-900 via-indigo-900 to-black">
+      <AdBanner position="top" context="login" className="fixed top-0 left-0 right-0 z-40" />
       {announcement && (
         <div className="fixed top-0 left-0 right-0 bg-yellow-600 text-white text-center py-2 text-sm z-50">
           {announcement}
@@ -126,6 +128,7 @@ function RegisterView() {
 
   return (
     <div className="min-h-screen flex items-center justify-center p-4 bg-gradient-to-br from-purple-900 via-indigo-900 to-black">
+      <AdBanner position="top" context="login" className="fixed top-0 left-0 right-0 z-40" />
       <Card className="w-full max-w-md bg-gray-900/80 border-gray-700 text-white">
         <CardHeader className="text-center pb-2">
           <CardTitle className="text-3xl font-black">
@@ -299,18 +302,29 @@ function SuperAdminView() {
   const [banDialog, setBanDialog] = useState<{ userId: string; username: string } | null>(null)
   const [banReason, setBanReason] = useState('')
   const [selectedReportedUser, setSelectedReportedUser] = useState<any>(null)
+  const [pendingUsers, setPendingUsers] = useState<any[]>([])
+  const [ads, setAds] = useState<any[]>([])
+  // Ad form state
+  const [adTitle, setAdTitle] = useState('')
+  const [adImageUrl, setAdImageUrl] = useState('')
+  const [adLinkUrl, setAdLinkUrl] = useState('')
+  const [adPosition, setAdPosition] = useState('top')
+  const [adShowLogin, setAdShowLogin] = useState(false)
+  const [adShowMain, setAdShowMain] = useState(true)
 
   useEffect(() => {
     let cancelled = false
     const load = async () => {
       try {
-        const [s, a, r, an] = await Promise.all([
+        const [s, a, r, an, p, ad] = await Promise.all([
           fetch('/api/super-admin-stats').then((r) => r.json()),
           fetch('/api/manage-admins').then((r) => r.json()),
           fetch('/api/reported-users').then((r) => r.json()),
           fetch('/api/announcements?all=true').then((r) => r.json()),
+          fetch('/api/pending-users').then((r) => r.json()),
+          fetch('/api/ads?action=list').then((r) => r.json()),
         ])
-        if (!cancelled) { setStats(s); setAdmins(a.admins || []); setReportedUsers(r.users || []); setAnnouncements(an.announcements || []) }
+        if (!cancelled) { setStats(s); setAdmins(a.admins || []); setReportedUsers(r.users || []); setAnnouncements(an.announcements || []); setPendingUsers(p.users || []); setAds(ad.ads || []) }
       } catch { /* ignore */ }
     }
     load()
@@ -319,13 +333,15 @@ function SuperAdminView() {
 
   const loadSuperAdminData = useCallback(async () => {
     try {
-      const [s, a, r, an] = await Promise.all([
+      const [s, a, r, an, p, ad] = await Promise.all([
         fetch('/api/super-admin-stats').then((r) => r.json()),
         fetch('/api/manage-admins').then((r) => r.json()),
         fetch('/api/reported-users').then((r) => r.json()),
         fetch('/api/announcements?all=true').then((r) => r.json()),
+        fetch('/api/pending-users').then((r) => r.json()),
+        fetch('/api/ads?action=list').then((r) => r.json()),
       ])
-      setStats(s); setAdmins(a.admins || []); setReportedUsers(r.users || []); setAnnouncements(an.announcements || [])
+      setStats(s); setAdmins(a.admins || []); setReportedUsers(r.users || []); setAnnouncements(an.announcements || []); setPendingUsers(p.users || []); setAds(ad.ads || [])
     } catch { /* ignore */ }
   }, [])
 
@@ -386,6 +402,27 @@ function SuperAdminView() {
     toast.success('Suspensión removida'); loadSuperAdminData()
   }
 
+  const handleVerifyUser = async (userId: string, username: string) => {
+    await fetch('/api/pending-users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'verify', userId }) })
+    toast.success(`${username} verificado`); loadSuperAdminData()
+  }
+  const handleRejectUser = async (userId: string, username: string) => {
+    await fetch('/api/pending-users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'reject', userId }) })
+    toast.error(`${username} eliminado`); loadSuperAdminData()
+  }
+  const handleCreateAd = async () => {
+    if (!adTitle || !adPosition) return toast.error('Falta título y posición')
+    await fetch('/api/ads', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: adTitle, imageUrl: adImageUrl, linkUrl: adLinkUrl, position: adPosition, showOnLogin: adShowLogin, showOnMain: adShowMain }) })
+    toast.success('Anuncio creado'); setAdTitle(''); setAdImageUrl(''); setAdLinkUrl(''); loadSuperAdminData()
+  }
+  const handleDeleteAd = async (id: string) => {
+    await fetch('/api/ads', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'delete', id }) })
+    toast.success('Anuncio eliminado'); loadSuperAdminData()
+  }
+  const handleToggleAd = async (id: string) => {
+    await fetch('/api/ads', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'toggle', id }) })
+    loadSuperAdminData()
+  }
   const handleLogout = () => { useDhobbytvStore.getState().reset(); useDhobbytvStore.getState().setView('login') }
 
   return (
@@ -399,8 +436,9 @@ function SuperAdminView() {
 
       <main className="max-w-7xl mx-auto p-6">
         {stats && (
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-6">
             {[
+              { label: 'Pendientes', value: stats.pendingUsers, color: 'text-yellow-400' },
               { label: 'Usuarios Verificados', value: stats.verifiedUsers, color: 'text-green-400' },
               { label: 'Baneados', value: stats.bannedUsers, color: 'text-red-400' },
               { label: 'Suspendidos', value: stats.suspendedUsers, color: 'text-orange-400' },
@@ -413,10 +451,41 @@ function SuperAdminView() {
 
         <Tabs value={activeTab} onValueChange={setActiveTab}>
           <TabsList className="bg-gray-900 mb-6 flex-wrap">
+            <TabsTrigger value="pending" className="data-[state=active]:bg-purple-600">Pendientes ({pendingUsers.length})</TabsTrigger>
             <TabsTrigger value="admins" className="data-[state=active]:bg-purple-600">Admins</TabsTrigger>
-            <TabsTrigger value="reported" className="data-[state=active]:bg-purple-600">Usuarios Reportados</TabsTrigger>
+            <TabsTrigger value="reported" className="data-[state=active]:bg-purple-600">Reportados</TabsTrigger>
             <TabsTrigger value="announcements" className="data-[state=active]:bg-purple-600">Anuncios</TabsTrigger>
+            <TabsTrigger value="ads-mgmt" className="data-[state=active]:bg-purple-600">Publicidad</TabsTrigger>
           </TabsList>
+
+          {/* PENDING USERS TAB */}
+          <TabsContent value="pending">
+            <Card className="bg-gray-900 border-gray-800">
+              <CardHeader><CardTitle className="text-lg">Usuarios Pendientes de Verificación ({pendingUsers.length})</CardTitle><CardDescription className="text-gray-400">Verifica o rechaza directamente. El video solo funciona cuando el servidor de chat esté activo.</CardDescription></CardHeader>
+              <CardContent>
+                <ScrollArea className="max-h-[600px]">
+                  <div className="space-y-2">
+                    {pendingUsers.map((u: any) => (
+                      <div key={u.id} className="flex items-center justify-between p-3 bg-gray-800 rounded-lg">
+                        <div className="flex items-center gap-3">
+                          <span className="text-lg">{getGenderShort(u.gender)}</span>
+                          <div>
+                            <p className="font-medium text-sm">{u.username}</p>
+                            <p className="text-xs text-gray-500">Registrado: {new Date(u.createdAt).toLocaleString()}</p>
+                          </div>
+                        </div>
+                        <div className="flex gap-2">
+                          <Button size="sm" className="bg-green-600 hover:bg-green-700 text-xs" onClick={() => handleVerifyUser(u.id, u.username)}>Verificar</Button>
+                          <Button size="sm" className="bg-red-600 hover:bg-red-700 text-xs" onClick={() => handleRejectUser(u.id, u.username)}>Rechazar</Button>
+                        </div>
+                      </div>
+                    ))}
+                    {pendingUsers.length === 0 && <p className="text-gray-500 text-center py-8">No hay usuarios pendientes</p>}
+                  </div>
+                </ScrollArea>
+              </CardContent>
+            </Card>
+          </TabsContent>
 
           {/* ADMINS TAB */}
           <TabsContent value="admins">
@@ -555,6 +624,63 @@ function SuperAdminView() {
               </Card>
             </div>
           </TabsContent>
+
+          {/* ADS MANAGEMENT TAB */}
+          <TabsContent value="ads-mgmt">
+            <div className="grid md:grid-cols-2 gap-6">
+              <Card className="bg-gray-900 border-gray-800">
+                <CardHeader><CardTitle className="text-lg">Crear Publicidad</CardTitle><CardDescription className="text-gray-400">Agrega anuncios de marcas o patrocinadores</CardDescription></CardHeader>
+                <CardContent className="space-y-3">
+                  <Input placeholder="Título del anuncio" value={adTitle} onChange={(e) => setAdTitle(e.target.value)} className="bg-gray-800 border-gray-600" />
+                  <Input placeholder="URL de imagen (opcional)" value={adImageUrl} onChange={(e) => setAdImageUrl(e.target.value)} className="bg-gray-800 border-gray-600" />
+                  <Input placeholder="URL de enlace al clicar (opcional)" value={adLinkUrl} onChange={(e) => setAdLinkUrl(e.target.value)} className="bg-gray-800 border-gray-600" />
+                  <div>
+                    <p className="text-gray-300 text-sm mb-2">Posición en pantalla:</p>
+                    <div className="grid grid-cols-3 gap-2">
+                      {[{v:'top',l:'Arriba'},{v:'bottom',l:'Abajo'},{v:'left',l:'Izquierda'},{v:'right',l:'Derecha'},{v:'popup',l:'Popup'},{v:'interstitial',l:'Pantalla completa'}].map(p => (
+                        <button key={p.v} onClick={() => setAdPosition(p.v)} className={`py-2 px-3 rounded-lg text-xs border transition-all ${adPosition === p.v ? 'bg-purple-600 border-purple-500 text-white' : 'bg-gray-800 border-gray-600 text-gray-300 hover:border-gray-400'}`}>{p.l}</button>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="flex gap-4">
+                    <label className="flex items-center gap-2 text-sm text-gray-300"><input type="checkbox" checked={adShowLogin} onChange={(e) => setAdShowLogin(e.target.checked)} /> Mostrar en login</label>
+                    <label className="flex items-center gap-2 text-sm text-gray-300"><input type="checkbox" checked={adShowMain} onChange={(e) => setAdShowMain(e.target.checked)} /> Mostrar en chat</label>
+                  </div>
+                  <Button onClick={handleCreateAd} className="w-full bg-purple-600 hover:bg-purple-700">Crear Publicidad</Button>
+                </CardContent>
+              </Card>
+              <Card className="bg-gray-900 border-gray-800">
+                <CardHeader><CardTitle className="text-lg">Publicidades ({ads.length})</CardTitle></CardHeader>
+                <CardContent>
+                  <ScrollArea className="max-h-96">
+                    <div className="space-y-2">
+                      {ads.map((a: any) => (
+                        <div key={a.id} className={`p-3 rounded-lg border ${a.active ? 'bg-green-900/20 border-green-800' : 'bg-gray-800 border-gray-700'}`}>
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="flex-1">
+                              <p className="text-sm font-medium">{a.title}</p>
+                              <div className="flex gap-2 mt-1">
+                                <Badge variant="outline" className="text-xs">{a.position}</Badge>
+                                {a.showOnLogin && <Badge variant="outline" className="text-xs text-blue-400">Login</Badge>}
+                                {a.showOnMain && <Badge variant="outline" className="text-xs text-green-400">Chat</Badge>}
+                                {a.imageUrl && <span className="text-xs text-gray-500">IMG</span>}
+                              </div>
+                              {a.imageUrl && <img src={a.imageUrl} alt="" className="mt-2 max-h-16 rounded" />}
+                            </div>
+                            <div className="flex gap-1">
+                              <Button size="sm" variant="outline" className={`text-xs ${a.active ? 'text-green-400 border-green-400' : 'text-gray-500'}`} onClick={() => handleToggleAd(a.id)}>{a.active ? 'ON' : 'OFF'}</Button>
+                              <Button size="sm" variant="destructive" className="text-xs" onClick={() => handleDeleteAd(a.id)}>X</Button>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                      {ads.length === 0 && <p className="text-gray-500 text-center py-8">No hay publicidades</p>}
+                    </div>
+                  </ScrollArea>
+                </CardContent>
+              </Card>
+            </div>
+          </TabsContent>
         </Tabs>
       </main>
 
@@ -603,6 +729,7 @@ function AdminView() {
   const [suspendHours, setSuspendHours] = useState('')
   const [banDialog, setBanDialog] = useState<{ userId: string; username: string } | null>(null)
   const [banReason, setBanReason] = useState('')
+  const [pendingUsers, setPendingUsers] = useState<any[]>([])
   const socketRef = useRef<Socket | null>(null)
   const remoteVideoRef = useRef<HTMLVideoElement>(null)
   const peerRef = useRef<RTCPeerConnection | null>(null)
@@ -613,11 +740,12 @@ function AdminView() {
     let cancelled = false
     const load = async () => {
       try {
-        const [s, r] = await Promise.all([
+        const [s, r, p] = await Promise.all([
           fetch('/api/admin-stats').then((res) => res.json()),
           fetch('/api/reported-users').then((res) => res.json()),
+          fetch('/api/pending-users').then((res) => res.json()),
         ])
-        if (!cancelled) { setStats(s); setReportedUsers(r.users || []) }
+        if (!cancelled) { setStats(s); setReportedUsers(r.users || []); setPendingUsers(p.users || []) }
       } catch { /* ignore */ }
     }
     load()
@@ -626,11 +754,12 @@ function AdminView() {
 
   const loadAdminData = useCallback(async () => {
     try {
-      const [s, r] = await Promise.all([
+      const [s, r, p] = await Promise.all([
         fetch('/api/admin-stats').then((res) => res.json()),
         fetch('/api/reported-users').then((res) => res.json()),
+        fetch('/api/pending-users').then((res) => res.json()),
       ])
-      setStats(s); setReportedUsers(r.users || [])
+      setStats(s); setReportedUsers(r.users || []); setPendingUsers(p.users || [])
     } catch { /* ignore */ }
   }, [])
 
@@ -767,6 +896,27 @@ function AdminView() {
             </CardContent>
           </Card>
         </div>
+
+        {/* Pending Users Section */}
+        <Card className="bg-gray-900 border-gray-800 mt-6">
+          <CardHeader><CardTitle className="text-lg">Usuarios Pendientes ({pendingUsers.length})</CardTitle><CardDescription className="text-gray-400">Verifica directamente sin necesidad de video</CardDescription></CardHeader>
+          <CardContent>
+            <ScrollArea className="max-h-64">
+              <div className="space-y-2">
+                {pendingUsers.map((u: any) => (
+                  <div key={u.id} className="flex items-center justify-between p-3 bg-gray-800 rounded-lg">
+                    <div className="flex items-center gap-3"><span>{getGenderShort(u.gender)}</span><div><p className="font-medium text-sm">{u.username}</p><p className="text-xs text-gray-500">{new Date(u.createdAt).toLocaleString()}</p></div></div>
+                    <div className="flex gap-2">
+                      <Button size="sm" className="bg-green-600 hover:bg-green-700 text-xs" onClick={async () => { await fetch('/api/pending-users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'verify', userId: u.id }) }); toast.success(`${u.username} verificado`); loadAdminData() }}>Verificar</Button>
+                      <Button size="sm" className="bg-red-600 hover:bg-red-700 text-xs" onClick={async () => { await fetch('/api/pending-users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'reject', userId: u.id }) }); toast.error(`${u.username} eliminado`); loadAdminData() }}>Rechazar</Button>
+                    </div>
+                  </div>
+                ))}
+                {pendingUsers.length === 0 && <p className="text-gray-500 text-center py-4">No hay usuarios pendientes</p>}
+              </div>
+            </ScrollArea>
+          </CardContent>
+        </Card>
 
         {/* Reported Users Section */}
         <Card className="bg-gray-900 border-gray-800 mt-6">
