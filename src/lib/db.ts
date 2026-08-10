@@ -1,23 +1,11 @@
-import { PrismaClient } from '@prisma/client'
-import { neon } from '@neondatabase/serverless'
-import { PrismaNeon } from '@prisma/adapter-neon'
+import { createClient } from '@supabase/supabase-js'
 
-const globalForPrisma = globalThis as unknown as {
-  prisma: PrismaClient | undefined
-}
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
+const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY!
 
-function createPrismaClient() {
-  const connectionString = process.env.DATABASE_URL
-  
-  // En Vercel/serverless, usar Neon adapter via WebSocket (evita problemas IPv6)
-  if (connectionString && process.env.NODE_ENV === 'production') {
-    const sql = neon(connectionString)
-    const adapter = new PrismaNeon(sql)
-    return new PrismaClient({ adapter })
-  }
+export const supabase = createClient(supabaseUrl, supabaseServiceKey, {
+  auth: { persistSession: false },
+})
 
-  return new PrismaClient()
-}
-
-export const db = globalForPrisma.prisma ?? createPrismaClient()
-if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = db
+// Re-export as 'db' for compatibility
+export const db = supabase

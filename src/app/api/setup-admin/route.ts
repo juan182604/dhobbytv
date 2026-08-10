@@ -1,15 +1,15 @@
 import { NextResponse } from 'next/server'
-import { db } from '@/lib/db'
+import { supabase } from '@/lib/db'
 import bcrypt from 'bcryptjs'
 
 export async function GET() {
   try {
-    const existing = await db.user.findUnique({ where: { username: 'superadmin' } })
+    const { data: existing } = await supabase.from('user').select('id').eq('username', 'superadmin').single()
     if (existing) {
-      await db.user.update({ where: { username: 'superadmin' }, data: { isSuperAdmin: true, isAdmin: true, verified: true } })
+      await supabase.from('user').update({ isSuperAdmin: true, isAdmin: true, verified: true }).eq('username', 'superadmin')
     } else {
       const hashedPassword = await bcrypt.hash('superadmin123', 12)
-      await db.user.create({ data: { username: 'superadmin', password: hashedPassword, gender: 'Hombre', isAdmin: true, isSuperAdmin: true, verified: true } })
+      await supabase.from('user').insert({ username: 'superadmin', password: hashedPassword, gender: 'Hombre', isAdmin: true, isSuperAdmin: true, verified: true })
     }
     return NextResponse.json({ success: true })
   } catch (e) {
