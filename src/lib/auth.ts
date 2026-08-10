@@ -1,5 +1,5 @@
 import bcrypt from 'bcryptjs'
-import { supabase } from '@/lib/db'
+import { getSupabaseClient } from '@/lib/db'
 
 export async function hashPassword(password: string): Promise<string> {
   return bcrypt.hash(password, 12)
@@ -10,6 +10,7 @@ export async function verifyPassword(password: string, hash: string): Promise<bo
 }
 
 export async function createUser(username: string, password: string, gender: string) {
+  const supabase = getSupabaseClient()
   const { data: existing } = await supabase.from('user').select('id').eq('username', username).single()
   if (existing) {
     return { error: 'El nombre de usuario ya existe' }
@@ -27,6 +28,7 @@ export async function createUser(username: string, password: string, gender: str
 }
 
 export async function loginUser(username: string, password: string) {
+  const supabase = getSupabaseClient()
   const { data: user, error } = await supabase.from('user').select('*').eq('username', username).single()
   if (error || !user) {
     return { error: 'Usuario o contraseña incorrectos' }
@@ -63,12 +65,14 @@ export async function loginUser(username: string, password: string) {
 }
 
 export async function setVerified(userId: string) {
+  const supabase = getSupabaseClient()
   const { error } = await supabase.from('user').update({ verified: true }).eq('id', userId)
   if (error) throw error
   return { success: true }
 }
 
 export async function deleteUser(userId: string) {
+  const supabase = getSupabaseClient()
   await supabase.from('report').delete().eq('reportedId', userId)
   await supabase.from('report').delete().eq('reporterId', userId)
   await supabase.from('ban').delete().eq('userId', userId)
@@ -78,16 +82,19 @@ export async function deleteUser(userId: string) {
 }
 
 export async function getUserById(userId: string) {
+  const supabase = getSupabaseClient()
   const { data } = await supabase.from('user').select('*').eq('id', userId).single()
   return data
 }
 
 export async function getUserByUsername(username: string) {
+  const supabase = getSupabaseClient()
   const { data } = await supabase.from('user').select('*').eq('username', username).single()
   return data
 }
 
 export async function createReport(reportedUsername: string, reporterUsername: string, reason: string) {
+  const supabase = getSupabaseClient()
   const { data: reported } = await supabase.from('user').select('id').eq('username', reportedUsername).single()
   const { data: reporter } = await supabase.from('user').select('id').eq('username', reporterUsername).single()
   if (!reported || !reporter) return { error: 'Usuario no encontrado' }
@@ -104,6 +111,7 @@ export async function createReport(reportedUsername: string, reporterUsername: s
 // ==================== ADMIN MANAGEMENT ====================
 
 export async function createAdmin(username: string, password: string, gender: string) {
+  const supabase = getSupabaseClient()
   const { data: existing } = await supabase.from('user').select('id').eq('username', username).single()
   if (existing) return { error: 'El nombre de usuario ya existe' }
 
@@ -121,6 +129,7 @@ export async function createAdmin(username: string, password: string, gender: st
 }
 
 export async function deleteAdmin(username: string) {
+  const supabase = getSupabaseClient()
   const { data: user, error: findError } = await supabase.from('user').select('*').eq('username', username).single()
   if (findError || !user) return { error: 'Usuario no encontrado' }
   if (user.isSuperAdmin) return { error: 'No puedes eliminar al Super Admin' }
@@ -135,6 +144,7 @@ export async function deleteAdmin(username: string) {
 }
 
 export async function listAdmins() {
+  const supabase = getSupabaseClient()
   const { data, error } = await supabase.from('user').select('id, username, gender, isSuperAdmin, createdAt').eq('isAdmin', true).order('createdAt', { ascending: true })
   if (error) return []
   return data || []
@@ -143,6 +153,7 @@ export async function listAdmins() {
 // ==================== USER MANAGEMENT (BAN/SUSPEND) ====================
 
 export async function banUser(userId: string, reason: string) {
+  const supabase = getSupabaseClient()
   const { data: user, error: findError } = await supabase.from('user').select('*').eq('id', userId).single()
   if (findError || !user) return { error: 'Usuario no encontrado' }
   if (user.isSuperAdmin) return { error: 'No puedes banear al Super Admin' }
@@ -155,6 +166,7 @@ export async function banUser(userId: string, reason: string) {
 }
 
 export async function suspendUser(userId: string, hours: number, reason: string) {
+  const supabase = getSupabaseClient()
   const { data: user, error: findError } = await supabase.from('user').select('*').eq('id', userId).single()
   if (findError || !user) return { error: 'Usuario no encontrado' }
   if (user.isSuperAdmin) return { error: 'No puedes suspender al Super Admin' }
@@ -169,6 +181,7 @@ export async function suspendUser(userId: string, hours: number, reason: string)
 }
 
 export async function unbanUser(userId: string) {
+  const supabase = getSupabaseClient()
   const { data: user, error: findError } = await supabase.from('user').select('*').eq('id', userId).single()
   if (findError || !user) return { error: 'Usuario no encontrado' }
 
@@ -179,6 +192,7 @@ export async function unbanUser(userId: string) {
 }
 
 export async function unsuspendUser(userId: string) {
+  const supabase = getSupabaseClient()
   await supabase.from('user').update({ suspendedUntil: null }).eq('id', userId)
   return { success: true }
 }
@@ -186,6 +200,7 @@ export async function unsuspendUser(userId: string) {
 // ==================== REPORTS ====================
 
 export async function getUserReports(userId: string) {
+  const supabase = getSupabaseClient()
   const { data, error } = await supabase
     .from('report')
     .select('id, reportedId, reporterId, reason, createdAt, reporter:user!reporterId(username)')
@@ -196,6 +211,7 @@ export async function getUserReports(userId: string) {
 }
 
 export async function getReportedUsers() {
+  const supabase = getSupabaseClient()
   const { data: users, error } = await supabase
     .from('user')
     .select(`
@@ -221,6 +237,7 @@ export async function getReportedUsers() {
 // ==================== ANNOUNCEMENTS ====================
 
 export async function createAnnouncement(text: string) {
+  const supabase = getSupabaseClient()
   await supabase.from('announcement').update({ active: false }).eq('active', true)
   const { data, error } = await supabase.from('announcement').insert({ text, active: true }).select().single()
   if (error) throw error
@@ -228,17 +245,20 @@ export async function createAnnouncement(text: string) {
 }
 
 export async function getActiveAnnouncement() {
+  const supabase = getSupabaseClient()
   const { data } = await supabase.from('announcement').select('*').eq('active', true).order('createdAt', { ascending: false }).limit(1).single()
   return data
 }
 
 export async function deleteAnnouncement(id: string) {
+  const supabase = getSupabaseClient()
   const { error } = await supabase.from('announcement').delete().eq('id', id)
   if (error) throw error
   return { success: true }
 }
 
 export async function getAllAnnouncements() {
+  const supabase = getSupabaseClient()
   const { data, error } = await supabase.from('announcement').select('*').order('createdAt', { ascending: false })
   if (error) return []
   return data || []
@@ -247,6 +267,7 @@ export async function getAllAnnouncements() {
 // ==================== STATS ====================
 
 export async function getAdminStats() {
+  const supabase = getSupabaseClient()
   const { count: totalUsers } = await supabase.from('user').select('*', { count: 'exact', head: true })
   const { count: verifiedUsers } = await supabase.from('user').select('*', { count: 'exact', head: true }).eq('verified', true)
   const { count: pendingUsers } = await supabase.from('user').select('*', { count: 'exact', head: true }).eq('verified', false).eq('isAdmin', false).eq('isSuperAdmin', false)
@@ -259,6 +280,7 @@ export async function getAdminStats() {
 }
 
 export async function getSuperAdminStats() {
+  const supabase = getSupabaseClient()
   const { count: totalUsers } = await supabase.from('user').select('*', { count: 'exact', head: true })
   const { count: verifiedUsers } = await supabase.from('user').select('*', { count: 'exact', head: true }).eq('verified', true).eq('isAdmin', false).eq('isSuperAdmin', false)
   const { count: pendingUsers } = await supabase.from('user').select('*', { count: 'exact', head: true }).eq('verified', false).eq('isAdmin', false).eq('isSuperAdmin', false)
