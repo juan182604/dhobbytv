@@ -1,0 +1,40 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(cuid())
+  username  String   @unique
+  password  String
+  gender    String
+  verified  Boolean  @default(false)
+  isAdmin   Boolean  @default(false)
+  banned    Boolean  @default(false)
+  createdAt DateTime @default(now())
+  reports   Report[] @relation("ReportedUser")
+  filedReports Report[] @relation("ReporterUser")
+  bans      Ban[]
+}
+
+model Report {
+  id         String   @id @default(cuid())
+  reportedId String
+  reporterId String
+  reason     String
+  createdAt  DateTime @default(now())
+  reported   User     @relation("ReportedUser", fields: [reportedId], references: [id])
+  reporter   User     @relation("ReporterUser", fields: [reporterId], references: [id])
+}
+
+model Ban {
+  id        String   @id @default(cuid())
+  userId    String
+  reason    String
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id])
+}
