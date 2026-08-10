@@ -2,7 +2,7 @@ import { createClient, SupabaseClient } from '@supabase/supabase-js'
 
 let _supabase: SupabaseClient | null = null
 
-function getSupabase(): SupabaseClient {
+export function getSupabaseClient(): SupabaseClient {
   if (!_supabase) {
     const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
     const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY
@@ -22,17 +22,5 @@ function getSupabase(): SupabaseClient {
   return _supabase
 }
 
-// Lazy accessor — only initializes when first called at runtime
-export const supabase = new Proxy({} as SupabaseClient, {
-  get(_target, prop, receiver) {
-    const client = getSupabase()
-    const value = (client as any)[prop]
-    if (typeof value === 'function') {
-      return value.bind(client)
-    }
-    return value
-  },
-})
-
-// Re-export as 'db' for compatibility
-export const db = supabase
+// Legacy re-export for compatibility
+export const db = { get client() { return getSupabaseClient() } }
