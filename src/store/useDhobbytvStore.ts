@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 
-export type AppView = 'login' | 'register' | 'verification' | 'verification-waiting' | 'verification-video' | 'admin' | 'main' | 'chat'
+export type AppView = 'login' | 'register' | 'verification' | 'verification-waiting' | 'verification-video' | 'admin' | 'super-admin' | 'main' | 'chat'
 
 interface UserInfo {
   id: string
@@ -8,6 +8,7 @@ interface UserInfo {
   gender: string
   verified: boolean
   isAdmin: boolean
+  isSuperAdmin: boolean
 }
 
 interface PartnerInfo {
@@ -36,6 +37,7 @@ interface DhobbytvState {
   }>
   verificationAdminSocketId: string | null
   messages: Array<{ from: string; text: string; time: string }>
+  announcement: string | null
 
   setView: (view: AppView) => void
   setUser: (user: UserInfo | null) => void
@@ -49,6 +51,7 @@ interface DhobbytvState {
   setVerificationAdminSocketId: (id: string | null) => void
   addMessage: (from: string, text: string) => void
   clearMessages: () => void
+  setAnnouncement: (text: string | null) => void
   reset: () => void
 }
 
@@ -65,6 +68,7 @@ const initialState = {
   verificationQueue: [],
   verificationAdminSocketId: null,
   messages: [],
+  announcement: null as string | null,
 }
 
 export const useDhobbytvStore = create<DhobbytvState>((set) => ({
@@ -89,5 +93,6 @@ export const useDhobbytvStore = create<DhobbytvState>((set) => ({
       messages: [...state.messages, { from, text, time: new Date().toLocaleTimeString() }],
     })),
   clearMessages: () => set({ messages: [] }),
+  setAnnouncement: (text) => set({ announcement: text }),
   reset: () => set(initialState),
 }))

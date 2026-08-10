@@ -1,0 +1,417 @@
+   560→        <DialogContent className="bg-gray-900 border-gray-700 text-white">
+   561→          <DialogHeader><DialogTitle>Suspender a {suspendDialog?.username}</DialogTitle><DialogDescription className="text-gray-400">Indica por cuántas horas</DialogDescription></DialogHeader>
+   562→          <Input type="number" placeholder="Horas de suspensión" value={suspendHours} onChange={(e) => setSuspendHours(e.target.value)} className="bg-gray-800 border-gray-600" min="1" />
+   563→          <div className="flex gap-2 flex-wrap">
+   564→            {[1, 6, 24, 72, 168].map((h) => (
+   565→              <Button key={h} size="sm" variant="outline" className={Number(suspendHours) === h ? 'bg-orange-600 border-orange-500' : ''} onClick={() => setSuspendHours(String(h))}>{h}h</Button>
+   566→            ))}
+   567→          </div>
+   568→          <div className="flex gap-3">
+   569→            <Button variant="outline" className="flex-1" onClick={() => setSuspendDialog(null)}>Cancelar</Button>
+   570→            <Button className="flex-1 bg-orange-600 hover:bg-orange-700" onClick={handleSuspend}>Suspender</Button>
+   571→          </div>
+   572→        </DialogContent>
+   573→      </Dialog>
+   574→    </div>
+   575→  )
+   576→}
+   577→
+   578→// ==================== ADMIN PANEL (NORMAL) ====================
+   579→function AdminView() {
+   580→  const user = useDhobbytvStore((s) => s.user)
+   581→  const verificationQueue = useDhobbytvStore((s) => s.verificationQueue)
+   582→  const setVerificationQueue = useDhobbytvStore((s) => s.setVerificationQueue)
+   583→  const [activeVerification, setActiveVerification] = useState<{ socketId: string; username: string; gender: string } | null>(null)
+   584→  const [stats, setStats] = useState<any>(null)
+   585→  const [reportedUsers, setReportedUsers] = useState<any[]>([])
+   586→  const [selectedReportedUser, setSelectedReportedUser] = useState<any>(null)
+   587→  const [suspendDialog, setSuspendDialog] = useState<{ userId: string; username: string } | null>(null)
+   588→  const [suspendHours, setSuspendHours] = useState('')
+   589→  const [banDialog, setBanDialog] = useState<{ userId: string; username: string } | null>(null)
+   590→  const [banReason, setBanReason] = useState('')
+   591→  const socketRef = useRef<Socket | null>(null)
+   592→  const remoteVideoRef = useRef<HTMLVideoElement>(null)
+   593→  const peerRef = useRef<RTCPeerConnection | null>(null)
+   594→  const [adminStream, setAdminStream] = useState<MediaStream | null>(null)
+   595→  const onlineCount = useDhobbytvStore((s) => s.onlineCount)
+   596→
+   597→  const loadData = useCallback(async () => {
+   598→    const [s, r] = await Promise.all([
+   599→      fetch('/api/admin-stats').then((res) => res.json()),
+   600→      fetch('/api/reported-users').then((res) => res.json()),
+   601→    ])
+   602→    setStats(s); setReportedUsers(r.users || [])
+   603→  }, [])
+   604→
+   605→  useEffect(() => { loadData() }, [loadData])
+   606→
+   607→  useEffect(() => {
+   608→    const socket = io('/?XTransformPort=3003', { transports: ['websocket'] })
+   609→    socketRef.current = socket
+   610→    socket.on('connect', () => {
+   611→      socket.emit('user-online', { username: user?.username, gender: user?.gender, country: '', countryCode: '', verified: true, isAdmin: true })
+   612→      socket.emit('get-verification-queue')
+   613→    })
+   614→    socket.on('verification-queue', (data) => setVerificationQueue(data.queue))
+   615→    socket.on('online-count', (data) => useDhobbytvStore.getState().setOnlineCount(data.count))
+   616→    return () => { socket.disconnect() }
+   617→  }, [])
+   618→
+   619→  useEffect(() => {
+   620→    if (!activeVerification || !socketRef.current) return
+   621→    let mounted = true
+   622→    const setupPeer = async () => {
+   623→      const audioCtx = new AudioContext()
+   624→      const oscillator = audioCtx.createOscillator()
+   625→      const dest = audioCtx.createMediaStreamDestination()
+   626→      oscillator.connect(dest); oscillator.start()
+   627→      const stream = dest.stream
+   628→      setAdminStream(stream)
+   629→      const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] })
+   630→      peerRef.current = pc
+   631→      stream.getTracks().forEach((track) => pc.addTrack(track, stream))
+   632→      pc.onicecandidate = (e) => { if (e.candidate) socketRef.current?.emit('webrtc-ice-candidate', { targetId: activeVerification.socketId, candidate: e.candidate }) }
+   633→      pc.ontrack = (e) => { if (remoteVideoRef.current && mounted) remoteVideoRef.current.srcObject = e.streams[0] }
+   634→      const offer = await pc.createOffer()
+   635→      await pc.setLocalDescription(offer)
+   636→      socketRef.current?.emit('webrtc-offer', { targetId: activeVerification.socketId, offer })
+   637→    }
+   638→    setupPeer()
+   639→    const handleAnswer = async (data: { fromId: string; answer: RTCSessionDescriptionInit }) => { if (peerRef.current) await peerRef.current.setRemoteDescription(new RTCSessionDescription(data.answer)) }
+   640→    const handleIce = (data: { fromId: string; candidate: RTCIceCandidateInit }) => { peerRef.current?.addIceCandidate(new RTCIceCandidate(data.candidate)) }
+   641→    socketRef.current.on('webrtc-answer', handleAnswer)
+   642→    socketRef.current.on('webrtc-ice-candidate', handleIce)
+   643→    return () => { mounted = false; peerRef.current?.close(); peerRef.current = null; audioCtx?.close?.(); stream?.getTracks().forEach((t) => t.stop()) }
+   644→  }, [activeVerification])
+   645→
+   646→  const handleAccept = () => {
+   647→    if (!activeVerification || !socketRef.current) return
+   648→    socketRef.current.emit('admin-accept-verification', { userSocketId: activeVerification.socketId })
+   649→    fetch('/api/verify-user', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: activeVerification.username }) })
+   650→    cleanupVerification(); toast.success(`${activeVerification.username} verificado`); loadData()
+   651→  }
+   652→  const handleReject = () => {
+   653→    if (!activeVerification || !socketRef.current) return
+   654→    socketRef.current.emit('admin-reject-verification', { userSocketId: activeVerification.socketId })
+   655→    fetch('/api/delete-user', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: activeVerification.username }) })
+   656→    cleanupVerification(); toast.error(`${activeVerification.username} rechazado`); loadData()
+   657→  }
+   658→  const cleanupVerification = () => { peerRef.current?.close(); peerRef.current = null; adminStream?.getTracks().forEach((t) => t.stop()); setAdminStream(null); setActiveVerification(null); if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null }
+   659→  const handleJoinVerification = (item: any) => { setActiveVerification({ socketId: item.socketId, username: item.username, gender: item.gender }); socketRef.current?.emit('admin-join-verification', { userSocketId: item.socketId }) }
+   660→
+   661→  const handleBan = async () => {
+   662→    if (!banDialog || !banReason) return
+   663→    const res = await fetch('/api/ban-user', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userId: banDialog.userId, reason: banReason }) })
+   664→    const data = await res.json()
+   665→    if (data.error) return toast.error(data.error)
+   666→    toast.success(`${banDialog.username} baneado`); setBanDialog(null); setBanReason(''); loadData()
+   667→  }
+   668→  const handleSuspend = async () => {
+   669→    if (!suspendDialog || !suspendHours) return
+   670→    const res = await fetch('/api/suspend-user', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userId: suspendDialog.userId, hours: suspendHours }) })
+   671→    const data = await res.json()
+   672→    if (data.error) return toast.error(data.error)
+   673→    toast.success(`${suspendDialog.username} suspendido`); setSuspendDialog(null); setSuspendHours(''); loadData()
+   674→  }
+   675→  const handleUnban = async (userId: string) => { await fetch('/api/unban-user', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userId, type: 'unban' }) }); toast.success('Desbaneado'); loadData() }
+   676→  const handleUnsuspend = async (userId: string) => { await fetch('/api/unban-user', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userId, type: 'unsuspend' }) }); toast.success('Suspensión quitada'); loadData() }
+   677→
+   678→  const handleLogout = () => { socketRef.current?.disconnect(); useDhobbytvStore.getState().reset(); useDhobbytvStore.getState().setView('login') }
+   679→
+   680→  return (
+   681→    <div className="min-h-screen bg-gray-950 text-white">
+   682→      <header className="border-b border-gray-800 px-6 py-4">
+   683→        <div className="flex items-center justify-between max-w-7xl mx-auto">
+   684→          <h1 className="text-2xl font-black"><span className="text-purple-400">dhobby</span><span className="text-green-400">tv</span><span className="text-blue-400 text-sm ml-2">ADMIN</span></h1>
+   685→          <div className="flex items-center gap-4">
+   686→            <Badge variant="outline" className="text-green-400 border-green-400">{onlineCount} online</Badge>
+   687→            <Button variant="outline" className="text-gray-400" onClick={handleLogout}>Salir</Button>
+   688→          </div>
+   689→        </div>
+   690→      </header>
+   691→      <main className="max-w-7xl mx-auto p-6">
+   692→        {stats && (
+   693→          <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-6">
+   694→            {[
+   695→              { label: 'Total', value: stats.totalUsers, color: 'text-purple-400' },
+   696→              { label: 'Verificados', value: stats.verifiedUsers, color: 'text-green-400' },
+   697→              { label: 'Pendientes', value: stats.pendingUsers, color: 'text-yellow-400' },
+   698→              { label: 'Baneados', value: stats.bannedUsers, color: 'text-red-400' },
+   699→              { label: 'Reportes', value: stats.totalReports, color: 'text-orange-400' },
+   700→            ].map((s) => (
+   701→              <Card key={s.label} className="bg-gray-900 border-gray-800"><CardContent className="p-3 text-center"><p className={`text-2xl font-bold ${s.color}`}>{s.value}</p><p className="text-xs text-gray-500">{s.label}</p></CardContent></Card>
+   702→            ))}
+   703→          </div>
+   704→        )}
+   705→        <div className="grid md:grid-cols-2 gap-6">
+   706→          <Card className="bg-gray-900 border-gray-800">
+   707→            <CardHeader><CardTitle className="text-lg">Cola de Verificación ({verificationQueue.length})</CardTitle></CardHeader>
+   708→            <CardContent>
+   709→              {verificationQueue.length === 0 ? <p className="text-gray-500 text-center py-8">Nadie esperando</p> : (
+   710→                <ScrollArea className="max-h-64">
+   711→                  <div className="space-y-2">
+   712→                    {verificationQueue.map((item, i) => {
+   713→                      const waitMin = Math.floor((Date.now() - item.joinedAt) / 60000)
+   714→                      const waitSec = Math.floor(((Date.now() - item.joinedAt) % 60000) / 1000)
+   715→                      return (
+   716→                        <div key={item.socketId} className="flex items-center justify-between p-3 bg-gray-800 rounded-lg">
+   717→                          <div className="flex items-center gap-3"><span className="text-gray-500 text-sm w-6">#{i + 1}</span><span>{getGenderShort(item.gender)}</span><div><p className="font-medium text-sm">{item.username}</p><p className="text-xs text-gray-500">{waitMin}m {waitSec}s</p></div></div>
+   718→                          <Button size="sm" className="bg-purple-600 hover:bg-purple-700" onClick={() => handleJoinVerification(item)} disabled={!!activeVerification}>Unirme</Button>
+   719→                        </div>
+   720→                      )
+   721→                    })}
+   722→                  </div>
+   723→                </ScrollArea>
+   724→              )}
+   725→            </CardContent>
+   726→          </Card>
+   727→          <Card className="bg-gray-900 border-gray-800">
+   728→            <CardHeader><CardTitle className="text-lg">Verificación en Curso</CardTitle></CardHeader>
+   729→            <CardContent>
+   730→              {activeVerification ? (
+   731→                <div className="space-y-4">
+   732→                  <div className="relative rounded-xl overflow-hidden bg-black aspect-video"><video ref={remoteVideoRef} autoPlay playsInline className="w-full h-full object-cover" /><div className="absolute top-2 left-2 bg-gray-800/80 text-white text-xs px-2 py-1 rounded-full">{getGenderLabel(activeVerification.gender)} — {activeVerification.username}</div><div className="absolute bottom-2 right-2 bg-blue-600 text-white text-xs px-2 py-1 rounded-full">Tu cámara apagada</div></div>
+   733→                  <p className="text-gray-400 text-sm text-center">Pide que muestre su identificación</p>
+   734→                  <div className="flex gap-3"><Button className="flex-1 bg-green-600 hover:bg-green-700" onClick={handleAccept}>Aceptar</Button><Button className="flex-1 bg-red-600 hover:bg-red-700" onClick={handleReject}>Rechazar</Button></div>
+   735→                </div>
+   736→              ) : <div className="flex items-center justify-center py-16 text-gray-500">Selecciona una persona de la cola</div>}
+   737→            </CardContent>
+   738→          </Card>
+   739→        </div>
+   740→
+   741→        {/* Reported Users Section */}
+   742→        <Card className="bg-gray-900 border-gray-800 mt-6">
+   743→          <CardHeader><CardTitle className="text-lg">Usuarios Reportados ({reportedUsers.length})</CardTitle></CardHeader>
+   744→          <CardContent>
+   745→            <ScrollArea className="max-h-96">
+   746→              <div className="space-y-2">
+   747→                {reportedUsers.sort((a: any, b: any) => b._count.reports - a._count.reports).map((u: any) => (
+   748→                  <div key={u.id} className={`p-3 rounded-lg border ${u.banned ? 'bg-red-900/20 border-red-800' : u.suspendedUntil && new Date(u.suspendedUntil) > new Date() ? 'bg-orange-900/20 border-orange-800' : 'bg-gray-800 border-gray-700'}`}>
+   749→                    <div className="flex items-center justify-between flex-wrap gap-2">
+   750→                      <div className="flex items-center gap-3">
+   751→                        <span>{getGenderShort(u.gender)}</span>
+   752→                        <span className="font-medium text-sm">{u.username}</span>
+   753→                        <Badge variant={u._count.reports >= 5 ? 'destructive' : u._count.reports >= 3 ? 'secondary' : 'outline'} className={u._count.reports >= 3 ? 'bg-red-600 text-white' : u._count.reports >= 2 ? 'bg-orange-600 text-white' : ''}>{u._count.reports} reporte{u._count.reports !== 1 ? 's' : ''}</Badge>
+   754→                        {u.banned && <Badge className="bg-red-800">BANEADO</Badge>}
+   755→                        {u.suspendedUntil && new Date(u.suspendedUntil) > new Date() && <Badge className="bg-orange-600">SUSPENDIDO</Badge>}
+   756→                      </div>
+   757→                      <div className="flex gap-2 flex-wrap">
+   758→                        {!u.banned && <><Button size="sm" className="bg-red-600 hover:bg-red-700 text-xs" onClick={() => setBanDialog({ userId: u.id, username: u.username })}>Banear</Button><Button size="sm" className="bg-orange-600 hover:bg-orange-700 text-xs" onClick={() => setSuspendDialog({ userId: u.id, username: u.username })}>Suspender</Button></>}
+   759→                        {(u.banned || (u.suspendedUntil && new Date(u.suspendedUntil) > new Date())) && <Button size="sm" className="bg-green-600 text-xs" onClick={() => { if (u.banned) handleUnban(u.id); else handleUnsuspend(u.id) }}>{u.banned ? 'Desbanear' : 'Quitar suspensión'}</Button>}
+   760→                        <Button size="sm" variant="outline" className="text-xs" onClick={() => setSelectedReportedUser(selectedReportedUser?.id === u.id ? null : u)}>Ver reportes</Button>
+   761→                      </div>
+   762→                    </div>
+   763→                    {selectedReportedUser?.id === u.id && u.reports.length > 0 && (
+   764→                      <div className="mt-2 p-2 bg-gray-900 rounded-lg space-y-1">
+   765→                        {u.reports.map((r: any) => (
+   766→                          <div key={r.id} className="text-xs text-gray-300 flex gap-2"><span className="text-gray-500">{new Date(r.createdAt).toLocaleString()}</span><span>—</span><span>Por: {r.reporter.username}</span><span>—</span><span className="text-yellow-400">{r.reason}</span></div>
+   767→                        ))}
+   768→                      </div>
+   769→                    )}
+   770→                  </div>
+   771→                ))}
+   772→                {reportedUsers.length === 0 && <p className="text-gray-500 text-center py-8">No hay usuarios reportados</p>}
+   773→              </div>
+   774→            </ScrollArea>
+   775→          </CardContent>
+   776→        </Card>
+   777→      </main>
+   778→
+   779→      {/* Ban Dialog */}
+   780→      <Dialog open={!!banDialog} onOpenChange={() => setBanDialog(null)}>
+   781→        <DialogContent className="bg-gray-900 border-gray-700 text-white">
+   782→          <DialogHeader><DialogTitle>Banear a {banDialog?.username}</DialogTitle><DialogDescription className="text-gray-400">Baneo permanente hasta que el super admin lo revierta</DialogDescription></DialogHeader>
+   783→          <Input placeholder="Razón del baneo" value={banReason} onChange={(e) => setBanReason(e.target.value)} className="bg-gray-800 border-gray-600" />
+   784→          <div className="flex gap-3"><Button variant="outline" className="flex-1" onClick={() => setBanDialog(null)}>Cancelar</Button><Button className="flex-1 bg-red-600 hover:bg-red-700" onClick={handleBan}>Banear</Button></div>
+   785→        </DialogContent>
+   786→      </Dialog>
+   787→
+   788→      {/* Suspend Dialog */}
+   789→      <Dialog open={!!suspendDialog} onOpenChange={() => setSuspendDialog(null)}>
+   790→        <DialogContent className="bg-gray-900 border-gray-700 text-white">
+   791→          <DialogHeader><DialogTitle>Suspender a {suspendDialog?.username}</DialogTitle></DialogHeader>
+   792→          <Input type="number" placeholder="Horas" value={suspendHours} onChange={(e) => setSuspendHours(e.target.value)} className="bg-gray-800 border-gray-600" min="1" />
+   793→          <div className="flex gap-2 flex-wrap">{[1, 6, 24, 72, 168].map((h) => (<Button key={h} size="sm" variant="outline" className={Number(suspendHours) === h ? 'bg-orange-600 border-orange-500' : ''} onClick={() => setSuspendHours(String(h))}>{h}h</Button>))}</div>
+   794→          <div className="flex gap-3"><Button variant="outline" className="flex-1" onClick={() => setSuspendDialog(null)}>Cancelar</Button><Button className="flex-1 bg-orange-600 hover:bg-orange-700" onClick={handleSuspend}>Suspender</Button></div>
+   795→        </DialogContent>
+   796→      </Dialog>
+   797→    </div>
+   798→  )
+   799→}
+   800→
+   801→// ==================== MAIN VIEW ====================
+   802→function MainView() {
+   803→  const user = useDhobbytvStore((s) => s.user)
+   804→  const partner = useDhobbytvStore((s) => s.partner)
+   805→  const country = useDhobbytvStore((s) => s.country)
+   806→  const countryCode = useDhobbytvStore((s) => s.countryCode)
+   807→  const selectedCountry = useDhobbytvStore((s) => s.selectedCountry)
+   808→  const hobbies = useDhobbytvStore((s) => s.hobbies)
+   809→  const isSearching = useDhobbytvStore((s) => s.isSearching)
+   810→  const onlineCount = useDhobbytvStore((s) => s.onlineCount)
+   811→  const messages = useDhobbytvStore((s) => s.messages)
+   812→  const announcement = useDhobbytvStore((s) => s.announcement)
+   813→  const setSelectedCountry = useDhobbytvStore((s) => s.setSelectedCountry)
+   814→  const toggleHobby = useDhobbytvStore((s) => s.toggleHobby)
+   815→  const setPartner = useDhobbytvStore((s) => s.setPartner)
+   816→  const setSearching = useDhobbytvStore((s) => s.setSearching)
+   817→  const setOnlineCount = useDhobbytvStore((s) => s.setOnlineCount)
+   818→  const addMessage = useDhobbytvStore((s) => s.addMessage)
+   819→  const clearMessages = useDhobbytvStore((s) => s.clearMessages)
+   820→  const socketRef = useRef<Socket | null>(null)
+   821→  const localVideoRef = useRef<HTMLVideoElement>(null)
+   822→  const remoteVideoRef = useRef<HTMLVideoElement>(null)
+   823→  const peerRef = useRef<RTCPeerConnection | null>(null)
+   824→  const dataChannelRef = useRef<RTCDataChannel | null>(null)
+   825→  const localStreamRef = useRef<MediaStream | null>(null)
+   826→  const [chatInput, setChatInput] = useState('')
+   827→  const [showReport, setShowReport] = useState(false)
+   828→  const [reportReason, setReportReason] = useState('')
+   829→  const messagesEndRef = useRef<HTMLDivElement>(null)
+   830→  const [showCountrySelect, setShowCountrySelect] = useState(false)
+   831→  const [countrySearch, setCountrySearch] = useState('')
+   832→
+   833→  useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages])
+   834→
+   835→  const createPeerConnection = useCallback((socket: Socket, targetId: string, isInitiator: boolean) => {
+   836→    const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }] })
+   837→    peerRef.current = pc
+   838→    if (isInitiator) {
+   839→      const dc = pc.createDataChannel('chat')
+   840→      dc.onmessage = (e) => { if (partner) addMessage(partner.username, e.data) }
+   841→      dc.onopen = () => { dataChannelRef.current = dc }
+   842→      dataChannelRef.current = dc
+   843→    } else {
+   844→      pc.ondatachannel = (e) => { const dc = e.channel; dc.onmessage = (ev) => { if (partner) addMessage(partner.username, ev.data) }; dc.onopen = () => { dataChannelRef.current = dc }; dataChannelRef.current = dc }
+   845→    }
+   846→    pc.onicecandidate = (e) => { if (e.candidate) socket.emit('webrtc-ice-candidate', { targetId, candidate: e.candidate }) }
+   847→    pc.ontrack = (e) => { if (remoteVideoRef.current) remoteVideoRef.current.srcObject = e.streams[0] }
+   848→    return pc
+   849→  }, [partner, addMessage])
+   850→
+   851→  useEffect(() => {
+   852→    const socket = io('/?XTransformPort=3003', { transports: ['websocket'] })
+   853→    socketRef.current = socket
+   854→    socket.on('connect', () => { socket.emit('user-online', { username: user?.username, gender: user?.gender, country, countryCode, verified: true, isAdmin: false }) })
+   855→    socket.on('online-count', (data) => setOnlineCount(data.count))
+   856→    socket.on('searching', () => setSearching(true))
+   857→    socket.on('partner-found', async (data) => {
+   858→      setSearching(false); setPartner(data); clearMessages()
+   859→      addMessage('Sistema', `Conectado con ${data.username} ${getCountryFlag(data.countryCode)} ${data.country}`)
+   860→      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+   861→      localStreamRef.current = stream
+   862→      if (localVideoRef.current) localVideoRef.current.srcObject = stream
+   863→      const pc = createPeerConnection(socket, data.peerSocketId, data.signal)
+   864→      stream.getTracks().forEach((track) => pc.addTrack(track, stream))
+   865→      if (data.signal) { const offer = await pc.createOffer(); await pc.setLocalDescription(offer); socket.emit('webrtc-offer', { targetId: data.peerSocketId, offer }) }
+   866→    })
+   867→    socket.on('webrtc-offer', async (data) => {
+   868→      if (!peerRef.current) { const pc = createPeerConnection(socket, data.fromId, false); localStreamRef.current?.getTracks().forEach((track) => pc.addTrack(track, localStreamRef.current!)) }
+   869→      if (peerRef.current) { await peerRef.current.setRemoteDescription(new RTCSessionDescription(data.offer)); const answer = await peerRef.current.createAnswer(); await peerRef.current.setLocalDescription(answer); socket.emit('webrtc-answer', { targetId: data.fromId, answer }) }
+   870→    })
+   871→    socket.on('webrtc-answer', async (data) => { if (peerRef.current) await peerRef.current.setRemoteDescription(new RTCSessionDescription(data.answer)) })
+   872→    socket.on('webrtc-ice-candidate', (data) => { peerRef.current?.addIceCandidate(new RTCIceCandidate(data.candidate)) })
+   873→    socket.on('partner-disconnected', () => { handleNext() })
+   874→    // eslint-disable-next-line react-hooks/exhaustive-deps
+   875→    return () => { localStreamRef.current?.getTracks().forEach((t) => t.stop()); peerRef.current?.close(); socket.disconnect() }
+   876→  }, [])
+   877→
+   878→  const handleSearch = () => { if (socketRef.current && user) { clearMessages(); socketRef.current.emit('search-partner', { country: selectedCountry, hobbies }) } }
+   879→
+   880→  const handleNext = useCallback(() => {
+   881→    if (socketRef.current) { socketRef.current.emit('next-partner'); socketRef.current.emit('stop-searching') }
+   882→    setPartner(null); clearMessages(); setSearching(false)
+   883→    peerRef.current?.close(); peerRef.current = null; dataChannelRef.current = null
+   884→    localStreamRef.current?.getTracks().forEach((t) => t.stop()); localStreamRef.current = null
+   885→    if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null
+   886→    if (localVideoRef.current) localVideoRef.current.srcObject = null
+   887→  }, [setPartner, clearMessages, setSearching])
+   888→
+   889→  const handleSendMessage = () => { if (!chatInput.trim() || !dataChannelRef.current) return; dataChannelRef.current.send(chatInput); addMessage(user?.username || 'Tú', chatInput); setChatInput('') }
+   890→  const handleReport = async () => { if (!partner || !reportReason || !user) return; await fetch('/api/report', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reportedUsername: partner.username, reporterUsername: user.username, reason: reportReason }) }); toast.success('Reporte enviado'); setShowReport(false); setReportReason(''); handleNext() }
+   891→  const handleLogout = () => { handleNext(); socketRef.current?.disconnect(); useDhobbytvStore.getState().reset(); useDhobbytvStore.getState().setView('login') }
+   892→
+   893→  const filteredCountries = COUNTRIES.filter((c) => c.code === 'all' || c.name.toLowerCase().includes(countrySearch.toLowerCase()))
+   894→
+   895→  return (
+   896→    <div className="min-h-screen bg-gray-950 text-white flex flex-col">
+   897→      {announcement && <div className="bg-yellow-600 text-white text-center py-2 text-sm shrink-0">📢 {announcement}</div>}
+   898→      <header className="border-b border-gray-800 px-4 py-3 shrink-0">
+   899→        <div className="flex items-center justify-between max-w-6xl mx-auto">
+   900→          <h1 className="text-xl font-black"><span className="text-purple-400">dhobby</span><span className="text-green-400">tv</span></h1>
+   901→          <div className="flex items-center gap-3">
+   902→            <Badge variant="outline" className="text-green-400 border-green-400 text-xs">{onlineCount} online</Badge>
+   903→            <span className="text-gray-400 text-sm hidden sm:inline">{getCountryFlag(countryCode)} {user?.username}</span>
+   904→            <Button variant="ghost" size="sm" className="text-gray-400" onClick={handleLogout}>Salir</Button>
+   905→          </div>
+   906→        </div>
+   907→      </header>
+   908→      <main className="flex-1 flex flex-col max-w-6xl mx-auto w-full p-4">
+   909→        {!partner && !isSearching && (
+   910→          <div className="flex-1 flex flex-col items-center justify-center gap-6">
+   911→            <div className="text-center"><h2 className="text-3xl font-bold mb-2">{getGenderShort(user?.gender || '')} Hola, {user?.username}</h2><p className="text-gray-400">Selecciona tus preferencias y busca alguien</p></div>
+   912→            <Card className="w-full max-w-md bg-gray-900 border-gray-800"><CardContent className="p-4">
+   913→              <p className="text-sm text-gray-400 mb-3">Filtrar por país:</p>
+   914→              <div className="relative">
+   915→                <button onClick={() => setShowCountrySelect(!showCountrySelect)} className="w-full flex items-center justify-between p-3 bg-gray-800 rounded-lg border border-gray-700 hover:border-gray-500 transition-colors">
+   916→                  <span className="flex items-center gap-2">{getCountryFlag(selectedCountry)} {getCountryName(selectedCountry)}</span>
+   917→                  <svg className={`w-4 h-4 transition-transform ${showCountrySelect ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
+   918→                </button>
+   919→                {showCountrySelect && (
+   920→                  <div className="absolute z-50 mt-1 w-full bg-gray-800 border border-gray-700 rounded-lg shadow-xl max-h-60 overflow-hidden">
+   921→                    <div className="p-2"><Input placeholder="Buscar país..." value={countrySearch} onChange={(e) => setCountrySearch(e.target.value)} className="bg-gray-700 border-gray-600 text-sm" autoFocus /></div>
+   922→                    <ScrollArea className="max-h-48">{filteredCountries.map((c) => (
+   923→                      <button key={c.code} onClick={() => { setSelectedCountry(c.code); setShowCountrySelect(false); setCountrySearch('') }} className={`w-full text-left px-4 py-2 text-sm hover:bg-gray-700 transition-colors flex items-center gap-2 ${selectedCountry === c.code ? 'bg-purple-600/20 text-purple-300' : 'text-gray-300'}`}>{c.flag} {c.name}</button>
+   924→                    ))}</ScrollArea>
+   925→                  </div>
+   926→                )}
+   927→              </div>
+   928→            </CardContent></Card>
+   929→            <Card className="w-full max-w-md bg-gray-900 border-gray-800"><CardContent className="p-4">
+   930→              <p className="text-sm text-gray-400 mb-3">Tus intereses (opcional):</p>
+   931→              <div className="flex flex-wrap gap-2">{HOBBIES.map((h) => (<button key={h.id} onClick={() => toggleHobby(h.id)} className={`px-3 py-1.5 rounded-full text-sm border transition-all ${hobbies.includes(h.id) ? 'bg-purple-600 border-purple-500 text-white' : 'bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-500'}`}>{h.icon} {h.label}</button>))}</div>
+   932→            </CardContent></Card>
+   933→            <Button onClick={handleSearch} className="bg-green-600 hover:bg-green-700 text-white font-bold px-12 py-7 text-xl rounded-2xl">Buscar Persona</Button>
+   934→          </div>
+   935→        )}
+   936→        {isSearching && !partner && (
+   937→          <div className="flex-1 flex flex-col items-center justify-center gap-4"><div className="w-16 h-16 border-4 border-purple-500 border-t-transparent rounded-full animate-spin" /><p className="text-gray-400 text-lg">Buscando persona...</p><Button variant="outline" className="text-gray-400" onClick={handleNext}>Cancelar</Button></div>
+   938→        )}
+   939→        {partner && (
+   940→          <div className="flex-1 flex flex-col gap-3">
+   941→            <div className="flex items-center justify-between bg-gray-900 rounded-lg px-4 py-2">
+   942→              <div className="flex items-center gap-2"><span>{getGenderShort(partner.gender)}</span><span className="font-medium">{partner.username}</span><span className="text-gray-400">{getCountryFlag(partner.countryCode)} {partner.country}</span></div>
+   943→            </div>
+   944→            <div className="relative rounded-xl overflow-hidden bg-black flex-1 min-h-0"><video ref={remoteVideoRef} autoPlay playsInline className="w-full h-full object-cover" /><div className="absolute bottom-3 right-3 w-32 h-24 sm:w-40 sm:h-30 rounded-lg overflow-hidden border-2 border-purple-500 shadow-lg"><video ref={localVideoRef} autoPlay playsInline muted className="w-full h-full object-cover" /></div></div>
+   945→            <div className="bg-gray-900 rounded-lg h-32 overflow-y-auto p-3 space-y-1">{messages.map((msg, i) => (<p key={i} className={`text-sm ${msg.from === 'Sistema' ? 'text-purple-400 italic' : msg.from === user?.username ? 'text-green-400' : 'text-gray-300'}`}><span className="font-medium">{msg.from}:</span> {msg.text}</p>))}<div ref={messagesEndRef} /></div>
+   946→            <div className="flex gap-2"><Input placeholder="Escribe un mensaje..." value={chatInput} onChange={(e) => setChatInput(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()} className="bg-gray-800 border-gray-700 text-white flex-1" /><Button onClick={handleSendMessage} className="bg-purple-600 hover:bg-purple-700">Enviar</Button></div>
+   947→            <div className="flex gap-2"><Button onClick={handleNext} className="flex-1 bg-blue-600 hover:bg-blue-700">Siguiente</Button><Button variant="outline" className="flex-1 border-red-600 text-red-400 hover:bg-red-600 hover:text-white" onClick={() => setShowReport(true)}>Reportar</Button></div>
+   948→          </div>
+   949→        )}
+   950→      </main>
+   951→      <Dialog open={showReport} onOpenChange={setShowReport}><DialogContent className="bg-gray-900 border-gray-700 text-white"><DialogHeader><DialogTitle>Reportar a {partner?.username}</DialogTitle><DialogDescription className="text-gray-400">Reporta si esta persona hace algo inapropiado</DialogDescription></DialogHeader><Input placeholder="Razón del reporte" value={reportReason} onChange={(e) => setReportReason(e.target.value)} className="bg-gray-800 border-gray-600" /><div className="flex gap-3"><Button variant="outline" className="flex-1" onClick={() => setShowReport(false)}>Cancelar</Button><Button className="flex-1 bg-red-600 hover:bg-red-700" onClick={handleReport}>Reportar</Button></div></DialogContent></Dialog>
+   952→    </div>
+   953→  )
+   954→}
+   955→
+   956→// ==================== MAIN APP ====================
+   957→export default function DhobbytvApp() {
+   958→  const view = useDhobbytvStore((s) => s.view)
+   959→  const setCountry = useDhobbytvStore((s) => s.setCountry)
+   960→  const setAnnouncement = useDhobbytvStore((s) => s.setAnnouncement)
+   961→
+   962→  useEffect(() => {
+   963→    fetch('/api/geoip').then((r) => r.json()).then((data) => setCountry(data.country, data.countryCode)).catch(() => setCountry('Desconocido', 'XX'))
+   964→    fetch('/api/announcements').then((r) => r.json()).then((data) => { if (data.announcement) setAnnouncement(data.announcement.text) }).catch(() => {})
+   965→  }, [])
+   966→
+   967→  useEffect(() => { fetch('/api/setup-admin').catch(() => {}) }, [])
+   968→
+   969→  const views: Record<AppView, JSX.Element> = {
+   970→    login: <LoginView />, register: <RegisterView />, verification: <VerificationView />,
+   971→    'verification-waiting': <VerificationView />, 'verification-video': <VerificationVideoView />,
+   972→    admin: <AdminView />, 'super-admin': <SuperAdminView />, main: <MainView />, chat: <MainView />,
+   973→  }
+   974→
+   975→  return (<>{views[view] || <LoginView />}<Toaster position="top-center" richColors /></>)
+   976→}

@@ -11,7 +11,7 @@ export async function POST(request: NextRequest) {
 
     const result = await loginUser(username, password)
     if (result.error) {
-      return NextResponse.json({ error: result.error }, { status: 401 })
+      return NextResponse.json({ error: result.error, suspended: result.suspended, suspendedUntil: result.suspendedUntil }, { status: 401 })
     }
 
     return NextResponse.json({ user: result.user })
