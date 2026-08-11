@@ -1,83 +1,60 @@
 import { NextResponse } from 'next/server'
 import { getSupabaseClient } from '@/lib/db'
+import pg from 'pg'
 
 // Cola de verificacion en SUPABASE PostgreSQL (persiste entre TODAS las instancias de Vercel)
-// Ya NO usa Map en memoria porque Vercel serverless tiene instancias separadas
+// Usa connection pooler cuando el host directo no resuelve
 
 const FIVE_MINUTES_MS = 300000
+let tableEnsured = false
 
-async function ensureTable(supabase: any): Promise<boolean> {
-  // Intentar crear la tabla via Supabase REST API usando fetch directo al endpoint pg/query
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
-  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY
-  
-  if (!supabaseUrl || !serviceKey) return false
-  
-  try {
-    // Extraer el ref del proyecto de la URL (https://xxx.supabase.co -> xxx)
-    const urlMatch = supabaseUrl.match(/https:\/\/([^.]+)\.supabase\.co/)
-    if (!urlMatch) return false
-    const ref = urlMatch[1]
-    
-    // Intentar via endpoint pg/query de Supabase
-    const pgUrl = `https://${ref}.supabase.co/pg/query`
-    const response = await fetch(pgUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${serviceKey}`,
-        'apikey': serviceKey,
-      },
-      body: JSON.stringify({
-        query: `
-          CREATE TABLE IF NOT EXISTS verify_queue (
-            "peerId" TEXT PRIMARY KEY,
-            username TEXT NOT NULL,
-            gender TEXT DEFAULT 'unknown',
-            "joinedAt" BIGINT DEFAULT 0,
-            "adminPeerId" TEXT
-          );
-          CREATE INDEX IF NOT EXISTS idx_verify_queue_joinedAt ON verify_queue ("joinedAt");
-        `
-      }),
-    })
-    
-    if (response.ok) return true
-    
-    // Si pg/query no funciona, intentar con el endpoint REST rpc
-    // Crear una funcion temporal que crea la tabla
-    const createFuncSql = `
-      CREATE OR REPLACE FUNCTION create_verify_queue_table()
-      RETURNS void AS $$
-      BEGIN
+function getPoolerUrl(): string | null {
+  const databaseUrl = process.env.DATABASE_URL || ''
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || ''
+  const refMatch = supabaseUrl.match(/https?:\/\/([^.]+)\.supabase\.co/)
+  const passMatch = databaseUrl.match(/:\/\/[^:]+:([^@]+)@/)
+  if (refMatch && passMatch) {
+    return `postgresql://postgres.${refMatch[1]}:${passMatch[1]}@aws-0-us-east-1.pooler.supabase.com:6543/postgres`
+  }
+  return null
+}
+
+async function ensureTable(): Promise<boolean> {
+  if (tableEnsured) return true
+
+  // Intentar con DATABASE_URL directo
+  const databaseUrl = process.env.DATABASE_URL
+  const urlsToTry: string[] = []
+  if (databaseUrl && (databaseUrl.startsWith('postgresql://') || databaseUrl.startsWith('postgres://'))) {
+    urlsToTry.push(databaseUrl)
+  }
+  // Intentar con pooler
+  const poolerUrl = getPoolerUrl()
+  if (poolerUrl) urlsToTry.push(poolerUrl)
+
+  for (const url of urlsToTry) {
+    try {
+      const client = new pg.Client({ connectionString: url })
+      await client.connect()
+      await client.query(`
         CREATE TABLE IF NOT EXISTS verify_queue (
           "peerId" TEXT PRIMARY KEY,
           username TEXT NOT NULL,
           gender TEXT DEFAULT 'unknown',
           "joinedAt" BIGINT DEFAULT 0,
           "adminPeerId" TEXT
-        );
-        CREATE INDEX IF NOT EXISTS idx_verify_queue_joinedAt ON verify_queue ("joinedAt");
-      END;
-      $$ LANGUAGE plpgsql;
-    `
-    
-    // Intentar ejecutar SQL via el endpoint SQL de Supabase
-    const sqlUrl = `https://${ref}.supabase.co/rest/v1/rpc/`
-    const funcResponse = await fetch(pgUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${serviceKey}`,
-        'apikey': serviceKey,
-      },
-      body: JSON.stringify({ query: createFuncSql }),
-    })
-    
-    return funcResponse.ok
-  } catch {
-    return false
+        )
+      `)
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_verify_queue_joinedAt ON verify_queue ("joinedAt")`)
+      await client.end()
+      tableEnsured = true
+      console.log('[verify-queue] Tabla creada via: ' + (url === databaseUrl ? 'directa' : 'pooler'))
+      return true
+    } catch (e: any) {
+      console.log('[verify-queue] Fallo conexion:', url.substring(0, 50), e.code || e.message)
+    }
   }
+  return false
 }
 
 export async function GET() {
@@ -85,12 +62,10 @@ export async function GET() {
     const supabase = getSupabaseClient()
     const now = Date.now()
 
-    // Limpiar expirados (envolver en try-catch, no usar .catch() en query builder)
-    try {
-      await supabase.from('verify_queue').delete().lt('joinedAt', now - FIVE_MINUTES_MS)
-    } catch {}
+    // Limpiar expirados
+    try { await supabase.from('verify_queue').delete().lt('joinedAt', now - FIVE_MINUTES_MS) } catch {}
 
-    // Obtener cola (solo los que no tienen admin asignado)
+    // Obtener cola
     const { data, error } = await supabase
       .from('verify_queue')
       .select('peerId, username, gender, joinedAt')
@@ -99,12 +74,8 @@ export async function GET() {
 
     if (error) {
       if (error.code === '42P01') {
-        // Tabla no existe, intentar crearla
-        const created = await ensureTable(supabase)
-        if (!created) {
-          return NextResponse.json({ queue: [], needSetup: true, setupUrl: '/api/setup-verify-queue' })
-        }
-        // Reintentar
+        const created = await ensureTable()
+        if (!created) return NextResponse.json({ queue: [], needSetup: true })
         const { data: retryData } = await supabase
           .from('verify_queue')
           .select('peerId, username, gender, joinedAt')
@@ -137,17 +108,13 @@ export async function POST(request: Request) {
     if (action === 'join' && peerId && username) {
       const now = Date.now()
       let { error } = await supabase.from('verify_queue').upsert({
-        peerId,
-        username,
-        gender: gender || 'unknown',
-        joinedAt: now,
-        adminPeerId: null,
+        peerId, username, gender: gender || 'unknown', joinedAt: now, adminPeerId: null,
       }, { onConflict: 'peerId' })
 
       if (error) {
         if (error.code === '42P01') {
-          const created = await ensureTable(supabase)
-          if (!created) return NextResponse.json({ error: 'Tabla no existe. Visita /api/setup-verify-queue para crearla.' }, { status: 500 })
+          const created = await ensureTable()
+          if (!created) return NextResponse.json({ error: 'Tabla no existe. Visita /api/setup-verify-queue' }, { status: 500 })
           const result = await supabase.from('verify_queue').upsert({
             peerId, username, gender: gender || 'unknown', joinedAt: now, adminPeerId: null,
           }, { onConflict: 'peerId' })
@@ -165,11 +132,7 @@ export async function POST(request: Request) {
     }
 
     if (action === 'heartbeat' && peerId) {
-      const now = Date.now()
-      const { error } = await supabase
-        .from('verify_queue')
-        .update({ joinedAt: now })
-        .eq('peerId', peerId)
+      const { error } = await supabase.from('verify_queue').update({ joinedAt: Date.now() }).eq('peerId', peerId)
       if (error) return NextResponse.json({ error: 'No esta en la cola' }, { status: 404 })
       return NextResponse.json({ success: true })
     }

@@ -2,12 +2,12 @@ import { NextResponse } from 'next/server'
 import pg from 'pg'
 
 // Crea la tabla verify_queue en Supabase PostgreSQL
-// Intenta: 1) pg directo con DATABASE_URL, 2) fetch al endpoint pg/query de Supabase
+// Usa el connection pooler de Supabase (el host directo no resuelve desde Vercel)
 
 export async function GET() {
   const results: string[] = []
 
-  // Metodo 1: Conexion directa via pg con DATABASE_URL
+  // Metodo 1: Conexion directa via DATABASE_URL
   const databaseUrl = process.env.DATABASE_URL
   if (databaseUrl && (databaseUrl.startsWith('postgresql://') || databaseUrl.startsWith('postgres://'))) {
     try {
@@ -24,70 +24,46 @@ export async function GET() {
       `)
       await client.query(`CREATE INDEX IF NOT EXISTS idx_verify_queue_joinedAt ON verify_queue ("joinedAt")`)
       await client.end()
-      results.push('Creada via conexion directa (pg)')
+      return NextResponse.json({ success: true, method: 'conexion directa' })
     } catch (e: any) {
-      results.push('Fallo conexion directa: ' + e.message)
+      results.push('Directa fallo: ' + e.code)
     }
-  } else {
-    results.push('DATABASE_URL no es PostgreSQL (es ' + (databaseUrl ? databaseUrl.substring(0, 20) + '...' : 'vacia') + ')')
   }
 
-  if (results.some(r => r.includes('Creada'))) {
-    return NextResponse.json({ success: true, method: results.join('; ') })
-  }
-
-  // Metodo 2: Via Supabase pg/query REST endpoint
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
-  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY
-
-  if (supabaseUrl && serviceKey) {
-    try {
-      const urlMatch = supabaseUrl.match(/https:\/\/([^.]+)\.supabase\.co/)
-      if (urlMatch) {
-        const ref = urlMatch[1]
-        const pgUrl = `https://${ref}.supabase.co/pg/query`
-        const response = await fetch(pgUrl, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${serviceKey}`,
-            'apikey': serviceKey,
-          },
-          body: JSON.stringify({
-            query: `
-              CREATE TABLE IF NOT EXISTS verify_queue (
-                "peerId" TEXT PRIMARY KEY,
-                username TEXT NOT NULL,
-                gender TEXT DEFAULT 'unknown',
-                "joinedAt" BIGINT DEFAULT 0,
-                "adminPeerId" TEXT
-              );
-              CREATE INDEX IF NOT EXISTS idx_verify_queue_joinedAt ON verify_queue ("joinedAt");
-            `
-          }),
-        })
-
-        if (response.ok) {
-          const text = await response.text()
-          results.push('Creada via pg/query endpoint: ' + text)
-          return NextResponse.json({ success: true, method: results.join('; ') })
-        } else {
-          const text = await response.text()
-          results.push('pg/query fallo (' + response.status + '): ' + text)
-        }
+  // Metodo 2: Via Supabase Connection Pooler (el host directo a veces no resuelve desde Vercel)
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || ''
+  const refMatch = supabaseUrl.match(/https?:\/\/([^.]+)\.supabase\.co/)
+  
+  if (refMatch && databaseUrl) {
+    const ref = refMatch[1]
+    // Extraer password del DATABASE_URL original
+    const passMatch = databaseUrl.match(/:\/\/[^:]+:([^@]+)@/)
+    const password = passMatch ? passMatch[1] : ''
+    
+    if (password) {
+      // Pooler URL: postgres.<ref>:<password>@aws-0-us-east-1.pooler.supabase.com:6543/postgres
+      const poolerUrl = `postgresql://postgres.${ref}:${password}@aws-0-us-east-1.pooler.supabase.com:6543/postgres`
+      
+      try {
+        const client = new pg.Client({ connectionString: poolerUrl })
+        await client.connect()
+        await client.query(`
+          CREATE TABLE IF NOT EXISTS verify_queue (
+            "peerId" TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            gender TEXT DEFAULT 'unknown',
+            "joinedAt" BIGINT DEFAULT 0,
+            "adminPeerId" TEXT
+          )
+        `)
+        await client.query(`CREATE INDEX IF NOT EXISTS idx_verify_queue_joinedAt ON verify_queue ("joinedAt")`)
+        await client.end()
+        return NextResponse.json({ success: true, method: 'connection pooler' })
+      } catch (e: any) {
+        results.push('Pooler fallo: ' + e.message)
       }
-    } catch (e: any) {
-      results.push('pg/query error: ' + e.message)
     }
-  } else {
-    results.push('Faltan NEXT_PUBLIC_SUPABASE_URL o SUPABASE_SERVICE_ROLE_KEY')
   }
 
-  return NextResponse.json({ 
-    success: false, 
-    attempts: results,
-    hint: 'Si ninguno funciono, copia y pega este SQL en Supabase SQL Editor (https://supabase.com/dashboard):',
-    sql: `CREATE TABLE IF NOT EXISTS verify_queue ("peerId" TEXT PRIMARY KEY, username TEXT NOT NULL, gender TEXT DEFAULT 'unknown', "joinedAt" BIGINT DEFAULT 0, "adminPeerId" TEXT);
-CREATE INDEX IF NOT EXISTS idx_verify_queue_joinedAt ON verify_queue ("joinedAt");`
-  })
+  return NextResponse.json({ success: false, attempts: results })
 }
