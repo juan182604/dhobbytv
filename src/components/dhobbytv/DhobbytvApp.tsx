@@ -330,8 +330,8 @@ function VerificationView() {
           body: JSON.stringify({ action: 'leave', peerId: peerIdRef.current }),
         }).catch(() => {})
       }
-      stopStream(globalStream)
-      setGlobalStream(null)
+      // NO matar globalStream aqui - VerificationVideoView lo necesita
+      // Solo se mata en handleExit (accion explicita del usuario)
     }
   }, [])
 
@@ -362,7 +362,7 @@ function VerificationView() {
       <main className="flex-1 flex flex-col items-center justify-center p-4 gap-4">
         {/* Preview de camara del usuario */}
         <div className="relative w-full max-w-md rounded-xl overflow-hidden border-2 border-green-500 shadow-lg shadow-green-500/20 bg-black" style={{ aspectRatio: '4/3' }}>
-          <video ref={localVideoRef} autoPlay playsInline muted className="w-full h-full object-cover" />
+          <video ref={localVideoRef} autoPlay playsInline muted style={{ transform: 'scaleX(-1)' }} className="w-full h-full object-cover" />
           {!cameraReady && (
             <div className="absolute inset-0 flex items-center justify-center">
               <div className="text-center space-y-2">
@@ -565,7 +565,7 @@ function VerificationVideoView() {
               </div>
             </div>
             <div className="absolute bottom-3 right-3 w-32 h-24 sm:w-40 sm:h-30 rounded-lg overflow-hidden border-2 border-green-500 shadow-lg">
-              <video ref={localVideoRef} autoPlay playsInline muted className="w-full h-full object-cover" />
+              <video ref={localVideoRef} autoPlay playsInline muted style={{ transform: 'scaleX(-1)' }} className="w-full h-full object-cover" />
             </div>
             <div className="absolute bottom-3 left-3 bg-green-600 text-white text-xs px-2 py-1 rounded-full flex items-center gap-1">
               <div className="w-2 h-2 bg-white rounded-full animate-pulse" />TU CAMARA
@@ -616,14 +616,59 @@ function AdminVerificationView() {
 
     setStatusMsg('Conectando con ' + verificationTarget.username + '...')
 
-    // 1. Conectar data channel SALIENTE al usuario
+    // 1. Pedir camara EN PARALELO con la conexion de datos
+    const streamPromise = (async () => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+        return stream
+      } catch {
+        try {
+          return await navigator.mediaDevices.getUserMedia({ video: false, audio: true })
+        } catch {
+          return new MediaStream()
+        }
+      }
+    })()
+
+    // 2. Conectar data channel SALIENTE al usuario
     const dataConn = globalPeer.connect(verificationTarget.peerId, { reliable: true })
     dataConnRef.current = dataConn
 
-    dataConn.on('open', () => {
+    dataConn.on('open', async () => {
       if (!mounted) return
-      setStatusMsg('Data conectado. Preparando video...')
-      addVerificationMessage('Sistema', 'Conexion establecida. Preparando video...')
+      setStatusMsg('Data conectado. Llamando por video...')
+      addVerificationMessage('Sistema', 'Conexion establecida. Llamando por video...')
+
+      // Data abierto + camara lista = llamar inmediatamente
+      const callStream = await streamPromise
+      if (!mounted || !globalPeer || !verificationTarget) return
+
+      if (callStream.getVideoTracks().length > 0) {
+        adminStreamRef.current = callStream
+        if (localVideoRef.current) localVideoRef.current.srcObject = callStream
+        setAdminCameraOn(true)
+      }
+
+      setStatusMsg('Llamando a ' + verificationTarget.username + '...')
+      const call = globalPeer.call(verificationTarget.peerId, callStream)
+      mediaCallRef.current = call
+
+      call.on('stream', (remoteStream: MediaStream) => {
+        if (remoteVideoRef.current && mounted) {
+          remoteVideoRef.current.srcObject = remoteStream
+          setStatusMsg('Video conectado con ' + verificationTarget.username + '. Revisa su documento.')
+          addVerificationMessage('Sistema', 'Video conectado.')
+        }
+      })
+
+      call.on('close', () => {
+        if (mounted) { toast.error('El usuario se desconecto'); handleBack() }
+      })
+
+      call.on('error', (err: any) => {
+        console.error('Call error:', err)
+        if (mounted) setStatusMsg('Error en la llamada. El usuario puede no estar disponible.')
+      })
     })
 
     dataConn.on('data', (raw: any) => {
@@ -633,79 +678,20 @@ function AdminVerificationView() {
         if (msg.type === 'chat') {
           addVerificationMessage(verificationTarget.username, msg.text)
         } else if (msg.type === 'verify-user-info') {
-          setStatusMsg('Conectado con ' + msg.username + '. Preparando video...')
+          setStatusMsg('Conectado con ' + msg.username)
         }
       } catch {
         addVerificationMessage(verificationTarget.username, String(raw))
       }
     })
 
-    // 2. Pedir camara/micro y llamar al usuario DESPUES de que el data abra
-    const makeCall = async () => {
-      if (!globalPeer || !verificationTarget || !mounted) return
-
-      setStatusMsg('Pidiendo permisos de camara...')
-      let callStream = adminStreamRef.current
-      if (!callStream) {
-        try {
-          callStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
-          adminStreamRef.current = callStream
-          if (localVideoRef.current) localVideoRef.current.srcObject = callStream
-          setAdminCameraOn(true)
-        } catch {
-          try {
-            callStream = await navigator.mediaDevices.getUserMedia({ video: false, audio: true })
-            adminStreamRef.current = callStream
-          } catch {
-            callStream = new MediaStream()
-          }
-        }
-      }
-
-      if (!mounted || !globalPeer || !verificationTarget) return
-      setStatusMsg('Llamando a ' + verificationTarget.username + '...')
-
-      const call = globalPeer.call(verificationTarget.peerId, callStream)
-      mediaCallRef.current = call
-
-      call.on('stream', (remoteStream: MediaStream) => {
-        if (remoteVideoRef.current && mounted) {
-          remoteVideoRef.current.srcObject = remoteStream
-          setStatusMsg('Video conectado con ' + verificationTarget.username + '. Revisa su documento.')
-          addVerificationMessage('Sistema', 'Video conectado. Puede iniciar la verificacion.')
-        }
-      })
-
-      call.on('close', () => {
-        if (mounted) {
-          toast.error('El usuario se desconecto')
-          handleBack()
-        }
-      })
-
-      call.on('error', (err: any) => {
-        console.error('Call error:', err)
-        if (mounted) setStatusMsg('Error en la llamada de video. Reintentando...')
-      })
-    }
-
-    // Esperar a que el data connection abra antes de llamar
-    // Esto asegura que el usuario ya registro los listeners
-    if (dataConn.open) {
-      makeCall()
-    } else {
-      dataConn.on('open', () => {
-        setTimeout(makeCall, 500)
-      })
-    }
-
-    // Timeout: si en 15s no hay video, avisar
+    // Timeout 12s
     const timeout = setTimeout(() => {
       if (mounted && !remoteVideoRef.current?.srcObject) {
-        setStatusMsg('Tardando en conectar video. El usuario puede tener problemas de conexion.')
-        addVerificationMessage('Sistema', 'El video del usuario aun no llega. Puede intentar escribirle.')
+        setStatusMsg('El video tarda mas de lo normal. Puedes escribirle al usuario.')
+        addVerificationMessage('Sistema', 'Video aun no conectado. Intente escribir al usuario.')
       }
-    }, 15000)
+    }, 12000)
 
     return () => {
       mounted = false
@@ -845,7 +831,7 @@ function AdminVerificationView() {
             <video ref={remoteVideoRef} autoPlay playsInline className="w-full h-full object-cover" />
             <div className="absolute bottom-3 right-3 w-32 h-24 sm:w-40 sm:h-30 rounded-lg overflow-hidden border-2 border-blue-500 shadow-lg bg-gray-900">
               {adminCameraOn ? (
-                <video ref={localVideoRef} autoPlay playsInline muted className="w-full h-full object-cover" />
+                <video ref={localVideoRef} autoPlay playsInline muted style={{ transform: 'scaleX(-1)' }} className="w-full h-full object-cover" />
               ) : (
                 <div className="w-full h-full flex items-center justify-center"><div className="text-center"><div className="text-2xl">🔇</div><p className="text-xs text-gray-400 mt-1">Camara apagada</p></div></div>
               )}
@@ -963,9 +949,7 @@ function AdminView() {
       body: JSON.stringify({ action: 'signal', targetPeerId: target.peerId, adminPeerId: globalPeer!.id }),
     })
 
-    // Esperar un momento para que el usuario reciba la signal
-    await new Promise((r) => setTimeout(r, 1500))
-
+    // Cambiar inmediatamente - AdminVerificationView se encarga de esperar
     setVerificationTarget({ peerId: target.peerId, username: target.username, gender: target.gender })
     clearVerificationMessages()
     useDhobbytvStore.getState().setView('admin-verification')
@@ -1180,7 +1164,6 @@ function SuperAdminView() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action: 'signal', targetPeerId: target.peerId, adminPeerId: globalPeer!.id }),
     })
-    await new Promise((r) => setTimeout(r, 1500))
     setVerificationTarget({ peerId: target.peerId, username: target.username, gender: target.gender })
     clearVerificationMessages()
     useDhobbytvStore.getState().setView('admin-verification')
@@ -1627,7 +1610,7 @@ function MainView() {
         {partner && (
           <div className="flex-1 flex flex-col gap-3">
             <div className="flex items-center justify-between bg-gray-900 rounded-lg px-4 py-2"><div className="flex items-center gap-2"><span>{getGenderShort(partner.gender)}</span><span className="font-medium">{partner.username}</span><span className="text-gray-400">{getCountryFlag(partner.countryCode)} {partner.country}</span></div></div>
-            <div className="relative rounded-xl overflow-hidden bg-black flex-1 min-h-0"><video ref={remoteVideoRef} autoPlay playsInline className="w-full h-full object-cover" /><div className="absolute bottom-3 right-3 w-32 h-24 sm:w-40 sm:h-30 rounded-lg overflow-hidden border-2 border-purple-500 shadow-lg"><video ref={localVideoRef} autoPlay playsInline muted className="w-full h-full object-cover" /></div></div>
+            <div className="relative rounded-xl overflow-hidden bg-black flex-1 min-h-0"><video ref={remoteVideoRef} autoPlay playsInline className="w-full h-full object-cover" /><div className="absolute bottom-3 right-3 w-32 h-24 sm:w-40 sm:h-30 rounded-lg overflow-hidden border-2 border-purple-500 shadow-lg"><video ref={localVideoRef} autoPlay playsInline muted style={{ transform: 'scaleX(-1)' }} className="w-full h-full object-cover" /></div></div>
             <div className="bg-gray-900 rounded-lg h-32 overflow-y-auto p-3 space-y-1">{messages.map((msg, i) => (<p key={i} className={`text-sm ${msg.from === 'Sistema' ? 'text-purple-400 italic' : msg.from === user?.username ? 'text-green-400' : 'text-gray-300'}`}><span className="font-medium">{msg.from}:</span> {msg.text}</p>))}<div ref={messagesEndRef} /></div>
             <div className="flex gap-2"><Input placeholder="Escribe un mensaje..." value={chatInput} onChange={(e) => setChatInput(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()} className="bg-gray-800 border-gray-700 text-white flex-1" /><Button onClick={handleSendMessage} className="bg-purple-600 hover:bg-purple-700">Enviar</Button></div>
             <div className="flex gap-2"><Button onClick={handleNext} className="flex-1 bg-blue-600 hover:bg-blue-700">Siguiente</Button><Button variant="outline" className="flex-1 border-red-600 text-red-400 hover:bg-red-600 hover:text-white" onClick={() => setShowReport(true)}>Reportar</Button></div>
