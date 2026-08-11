@@ -48,3 +48,11 @@ model Announcement {
   active    Boolean  @default(true)
   createdAt DateTime @default(now())
 }
+
+model VerifyQueue {
+  peerId     String   @id
+  username   String
+  gender     String   @default("unknown")
+  joinedAt   Int      @default(0)
+  adminPeerId String?
+}

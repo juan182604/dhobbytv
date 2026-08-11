@@ -1000,7 +1000,7 @@ function SuperAdminView() {
       const [pendingRes, reportedRes, statsRes, queueRes] = await Promise.all([
         fetch('/api/pending-users').then((r) => r.json()),
         fetch('/api/reported-users').then((r) => r.json()).catch(() => ({ users: [] })),
-        fetch('/api/stats').then((r) => r.json()).catch(() => ({})),
+        fetch('/api/admin-stats').then((r) => r.json()).catch(() => ({})),
         fetch('/api/verify-queue').then((r) => r.json()),
       ])
       if (pendingRes.users) { setPendingUsers(pendingRes.users); cachedAdminData = { ...cachedAdminData, pendingUsers: pendingRes.users } }
