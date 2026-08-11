@@ -442,7 +442,7 @@ function VerificationVideoView() {
   useEffect(() => {
     let mounted = true
 
-    // Mostrar video local
+    // Mostrar video local inmediatamente
     if (localVideoRef.current && globalStream) {
       localVideoRef.current.srcObject = globalStream
     }
@@ -453,53 +453,63 @@ function VerificationVideoView() {
       return () => { mounted = false }
     }
 
-    // 1. Conectar data channel con el admin (chat)
-    const dataConn = globalPeer.connect(verificationAdminPeerId, { reliable: true })
-    dataConnRef.current = dataConn
-
-    dataConn.on('open', () => {
+    // 1. ESCUCHAR conexion de datos ENTRANTE del admin (no crear salida)
+    // Cuando admin hace peer.connect(userPeerId), esto se dispara en el usuario
+    const handleConnection = (conn: any) => {
       if (!mounted) return
-      setStatusMsg('Conectado con admin. Muestra tu identificacion.')
-      dataConn.send(JSON.stringify({ type: 'verify-user-info', username: user?.username, gender: user?.gender }))
-      addVerificationMessage('Sistema', 'Conectado con el administrador. Puedes escribir mensajes abajo.')
-    })
+      dataConnRef.current = conn
 
-    dataConn.on('data', (raw: any) => {
-      if (!mounted) return
-      try {
-        const msg = typeof raw === 'string' ? JSON.parse(raw) : raw
-        if (msg.type === 'chat') {
-          addVerificationMessage('Admin', msg.text)
-        } else if (msg.type === 'verify-accepted') {
-          toast.success('Has sido verificado!')
-          const currentUser = useDhobbytvStore.getState().user
-          if (currentUser) {
-            useDhobbytvStore.getState().setUser({ ...currentUser, verified: true })
-            fetch('/api/verify-user', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: currentUser.username }) })
+      conn.on('open', () => {
+        if (!mounted) return
+        setStatusMsg('Conectado con admin. Muestra tu identificacion.')
+        conn.send(JSON.stringify({ type: 'verify-user-info', username: user?.username, gender: user?.gender }))
+        addVerificationMessage('Sistema', 'Conectado con el administrador. Puedes escribir mensajes abajo.')
+      })
+
+      conn.on('data', (raw: any) => {
+        if (!mounted) return
+        try {
+          const msg = typeof raw === 'string' ? JSON.parse(raw) : raw
+          if (msg.type === 'chat') {
+            addVerificationMessage('Admin', msg.text)
+          } else if (msg.type === 'verify-accepted') {
+            toast.success('Has sido verificado!')
+            const currentUser = useDhobbytvStore.getState().user
+            if (currentUser) {
+              useDhobbytvStore.getState().setUser({ ...currentUser, verified: true })
+              fetch('/api/verify-user', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: currentUser.username }) })
+            }
+            setTimeout(() => { useDhobbytvStore.getState().setView('main') }, 1000)
+          } else if (msg.type === 'verify-rejected') {
+            toast.error('Verificacion rechazada.')
+            const currentUser = useDhobbytvStore.getState().user
+            if (currentUser) fetch('/api/delete-user', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: currentUser.username }) })
+            setTimeout(() => { useDhobbytvStore.getState().setUser(null); useDhobbytvStore.getState().setView('login') }, 1000)
           }
-          setTimeout(() => { useDhobbytvStore.getState().setView('main') }, 1000)
-        } else if (msg.type === 'verify-rejected') {
-          toast.error('Verificacion rechazada.')
-          const currentUser = useDhobbytvStore.getState().user
-          if (currentUser) fetch('/api/delete-user', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: currentUser.username }) })
-          setTimeout(() => { useDhobbytvStore.getState().setUser(null); useDhobbytvStore.getState().setView('login') }, 1000)
+        } catch {
+          addVerificationMessage('Admin', String(raw))
         }
-      } catch {
-        // texto plano
-        addVerificationMessage('Admin', String(raw))
-      }
-    })
+      })
+    }
 
-    // 2. Recibir llamada del admin (video) - el admin es quien llama
+    globalPeer.on('connection', handleConnection)
+
+    // 2. ESCUCHAR llamada de video ENTRANTE del admin
     const handleCall = (call: any) => {
       if (!mounted || !globalStream) return
       call.answer(globalStream)
       call.on('stream', (remoteStream: MediaStream) => {
         if (remoteVideoRef.current && mounted) {
           remoteVideoRef.current.srcObject = remoteStream
-          // Ocultar placeholder cuando llega video
           const ph = document.getElementById('remote-video-placeholder')
           if (ph) ph.style.opacity = '0'
+          setStatusMsg('Video conectado. Muestra tu identificacion por camara.')
+        }
+      })
+      call.on('close', () => {
+        if (mounted) {
+          toast.error('El administrador se desconecto')
+          useDhobbytvStore.getState().setView('verification-pending')
         }
       })
     }
@@ -523,6 +533,7 @@ function VerificationVideoView() {
     if (dataConnRef.current) try { dataConnRef.current.close() } catch {}
     stopStream(globalStream)
     setGlobalStream(null)
+    cleanupPeer(globalPeer)
     setGlobalPeer(null)
     setGlobalPeerId(null)
     useDhobbytvStore.getState().setView('verification-pending')
@@ -605,13 +616,14 @@ function AdminVerificationView() {
 
     setStatusMsg('Conectando con ' + verificationTarget.username + '...')
 
-    // 1. Conectar data channel con el usuario
+    // 1. Conectar data channel SALIENTE al usuario
     const dataConn = globalPeer.connect(verificationTarget.peerId, { reliable: true })
     dataConnRef.current = dataConn
 
     dataConn.on('open', () => {
       if (!mounted) return
-      setStatusMsg('Conectado. Esperando video del usuario...')
+      setStatusMsg('Data conectado. Preparando video...')
+      addVerificationMessage('Sistema', 'Conexion establecida. Preparando video...')
     })
 
     dataConn.on('data', (raw: any) => {
@@ -621,17 +633,18 @@ function AdminVerificationView() {
         if (msg.type === 'chat') {
           addVerificationMessage(verificationTarget.username, msg.text)
         } else if (msg.type === 'verify-user-info') {
-          setStatusMsg(`Conectado con ${msg.username}. Esperando video...`)
+          setStatusMsg('Conectado con ' + msg.username + '. Preparando video...')
         }
       } catch {
         addVerificationMessage(verificationTarget.username, String(raw))
       }
     })
 
-    // 2. Llamar al usuario (video) - admin inicia la llamada
+    // 2. Pedir camara/micro y llamar al usuario DESPUES de que el data abra
     const makeCall = async () => {
-      if (!globalPeer || !verificationTarget) return
-      // Pedir camara/micro del admin para que la llamada WebRTC tenga tracks
+      if (!globalPeer || !verificationTarget || !mounted) return
+
+      setStatusMsg('Pidiendo permisos de camara...')
       let callStream = adminStreamRef.current
       if (!callStream) {
         try {
@@ -640,7 +653,6 @@ function AdminVerificationView() {
           if (localVideoRef.current) localVideoRef.current.srcObject = callStream
           setAdminCameraOn(true)
         } catch {
-          // Si no hay camara, usar stream de audio solo para que el mic funcione
           try {
             callStream = await navigator.mediaDevices.getUserMedia({ video: false, audio: true })
             adminStreamRef.current = callStream
@@ -649,13 +661,18 @@ function AdminVerificationView() {
           }
         }
       }
+
+      if (!mounted || !globalPeer || !verificationTarget) return
+      setStatusMsg('Llamando a ' + verificationTarget.username + '...')
+
       const call = globalPeer.call(verificationTarget.peerId, callStream)
       mediaCallRef.current = call
 
       call.on('stream', (remoteStream: MediaStream) => {
         if (remoteVideoRef.current && mounted) {
           remoteVideoRef.current.srcObject = remoteStream
-          setStatusMsg('Conectado con ' + verificationTarget.username + '. Revisa su documento.')
+          setStatusMsg('Video conectado con ' + verificationTarget.username + '. Revisa su documento.')
+          addVerificationMessage('Sistema', 'Video conectado. Puede iniciar la verificacion.')
         }
       })
 
@@ -665,13 +682,34 @@ function AdminVerificationView() {
           handleBack()
         }
       })
+
+      call.on('error', (err: any) => {
+        console.error('Call error:', err)
+        if (mounted) setStatusMsg('Error en la llamada de video. Reintentando...')
+      })
     }
 
-    // Esperar un poco y luego hacer la llamada de video
-    setTimeout(makeCall, 1000)
+    // Esperar a que el data connection abra antes de llamar
+    // Esto asegura que el usuario ya registro los listeners
+    if (dataConn.open) {
+      makeCall()
+    } else {
+      dataConn.on('open', () => {
+        setTimeout(makeCall, 500)
+      })
+    }
+
+    // Timeout: si en 15s no hay video, avisar
+    const timeout = setTimeout(() => {
+      if (mounted && !remoteVideoRef.current?.srcObject) {
+        setStatusMsg('Tardando en conectar video. El usuario puede tener problemas de conexion.')
+        addVerificationMessage('Sistema', 'El video del usuario aun no llega. Puede intentar escribirle.')
+      }
+    }, 15000)
 
     return () => {
       mounted = false
+      clearTimeout(timeout)
       try { dataConnRef.current?.close() } catch {}
       try { mediaCallRef.current?.close() } catch {}
     }
@@ -1056,7 +1094,7 @@ function SuperAdminView() {
   const [pendingUsers, setPendingUsers] = useState<any[]>([])
   const [reportedUsers, setReportedUsers] = useState<any[]>([])
   const [videoQueue, setVideoQueue] = useState<any[]>([])
-  const [stats, setStats] = useState<any>(null)
+  const [stats, setStats] = useState<any>({ totalUsers: 0, verifiedUsers: 0, pendingUsers: 0, bannedUsers: 0, totalReports: 0 })
   const [onlineCount, setOnlineCount] = useState(0)
   const [peerReady, setPeerReady] = useState(false)
   const [announcement, setAnnouncement] = useState('')
@@ -1075,7 +1113,7 @@ function SuperAdminView() {
       ])
       if (pendingRes.users) setPendingUsers(pendingRes.users)
       if (reportedRes.users) setReportedUsers(reportedRes.users)
-      if (statsRes) setStats(statsRes)
+      if (statsRes && statsRes.totalUsers !== undefined) setStats(statsRes)
       if (queueRes.queue) setVideoQueue(queueRes.queue)
     } catch {}
   }
@@ -1196,7 +1234,7 @@ function SuperAdminView() {
         </div>
       </header>
       <main className="max-w-7xl mx-auto p-6">
-        {stats && (<div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-6">{[{ label: 'Total', value: stats.totalUsers, color: 'text-purple-400' },{ label: 'Verificados', value: stats.verifiedUsers, color: 'text-green-400' },{ label: 'Pendientes', value: stats.pendingUsers, color: 'text-yellow-400' },{ label: 'Baneados', value: stats.bannedUsers, color: 'text-red-400' },{ label: 'Reportes', value: stats.totalReports, color: 'text-orange-400' }].map((s) => (<Card key={s.label} className="bg-gray-900 border-gray-800"><CardContent className="p-3 text-center"><p className={`text-2xl font-bold ${s.color}`}>{s.value}</p><p className="text-xs text-gray-500">{s.label}</p></CardContent></Card>))}</div>)}
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-6">{[{ label: 'Total', value: stats.totalUsers, color: 'text-purple-400' },{ label: 'Verificados', value: stats.verifiedUsers, color: 'text-green-400' },{ label: 'Pendientes', value: stats.pendingUsers, color: 'text-yellow-400' },{ label: 'Baneados', value: stats.bannedUsers, color: 'text-red-400' },{ label: 'Reportes', value: stats.totalReports, color: 'text-orange-400' }].map((s) => (<Card key={s.label} className="bg-gray-900 border-gray-800"><CardContent className="p-3 text-center"><p className={`text-2xl font-bold ${s.color}`}>{s.value}</p><p className="text-xs text-gray-500">{s.label}</p></CardContent></Card>))}</div>
 
         <Tabs defaultValue="video-queue">
           <TabsList className="bg-gray-900 mb-4">
