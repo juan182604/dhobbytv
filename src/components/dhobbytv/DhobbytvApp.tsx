@@ -209,12 +209,30 @@ function VerificationPendingView() {
   )
 }
 
-// ==================== VERIFICATION WAITING (en cola, camara lista, esperando admin via Gun.js + PeerJS) ====================
+// ==================== VERIFICATION WAITING (en cola, camara lista, esperando admin via API + PeerJS) ====================
 function VerificationView() {
   const user = useDhobbytvStore((s) => s.user)
   const [status, setStatus] = useState<'init' | 'waiting' | 'error'>('init')
   const [position, setPosition] = useState(0)
+  const [cameraReady, setCameraReady] = useState(false)
   const peerIdRef = useRef<string>('')
+  const localVideoRef = useRef<HTMLVideoElement>(null)
+
+  // Mostrar preview del stream en el video local
+  // Usamos un polling corto porque globalStream es una variable global mutable (no estado React)
+  const streamCheckRef = useRef<ReturnType<typeof setInterval>>(null)
+  useEffect(() => {
+    streamCheckRef.current = setInterval(() => {
+      if (localVideoRef.current && globalStream) {
+        if (localVideoRef.current.srcObject !== globalStream) {
+          localVideoRef.current.srcObject = globalStream
+        }
+        setCameraReady(true)
+        if (streamCheckRef.current) clearInterval(streamCheckRef.current)
+      }
+    }, 300)
+    return () => { if (streamCheckRef.current) clearInterval(streamCheckRef.current) }
+  }, [])
 
   useEffect(() => {
     let mounted = true
@@ -334,40 +352,72 @@ function VerificationView() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center p-4 bg-gradient-to-br from-purple-900 via-indigo-900 to-black">
-      <Card className="w-full max-w-md bg-gray-900/80 border-gray-700 text-white text-center">
-        <CardContent className="pt-8 pb-8 space-y-5">
-          <div className="text-6xl animate-pulse">📹</div>
-          <h2 className="text-2xl font-bold">Esperando Administrador</h2>
-          <p className="text-gray-400">Tu camara esta lista. Cuando un admin se conecte, se iniciara la verificacion por video.</p>
+    <div className="min-h-screen bg-gray-950 text-white flex flex-col">
+      <header className="border-b border-gray-800 px-4 py-3 shrink-0">
+        <div className="flex items-center justify-between max-w-6xl mx-auto">
+          <h1 className="text-xl font-black"><span className="text-purple-400">dhobby</span><span className="text-green-400">tv</span><span className="text-yellow-400 text-sm ml-2">VERIFICACION</span></h1>
+          <Button variant="ghost" size="sm" className="text-gray-400" onClick={handleExit}>Cancelar</Button>
+        </div>
+      </header>
+      <main className="flex-1 flex flex-col items-center justify-center p-4 gap-4">
+        {/* Preview de camara del usuario */}
+        <div className="relative w-full max-w-md rounded-xl overflow-hidden border-2 border-green-500 shadow-lg shadow-green-500/20 bg-black" style={{ aspectRatio: '4/3' }}>
+          <video ref={localVideoRef} autoPlay playsInline muted className="w-full h-full object-cover" />
+          {!cameraReady && (
+            <div className="absolute inset-0 flex items-center justify-center">
+              <div className="text-center space-y-2">
+                {status === 'init' ? (
+                  <>
+                    <div className="w-8 h-8 border-2 border-blue-400 border-t-transparent rounded-full animate-spin mx-auto" />
+                    <p className="text-gray-300 text-sm">Activando camara...</p>
+                  </>
+                ) : status === 'error' ? (
+                  <>
+                    <div className="text-3xl">📷</div>
+                    <p className="text-red-400 text-sm">No se pudo acceder a la camara</p>
+                  </>
+                ) : null}
+              </div>
+            </div>
+          )}
+          <div className="absolute bottom-3 left-3 bg-green-600 text-white text-xs px-2 py-1 rounded-full flex items-center gap-1">
+            <div className="w-2 h-2 bg-white rounded-full animate-pulse" />{cameraReady ? 'CAMARA ACTIVA' : 'CONECTANDO...'}
+          </div>
+        </div>
 
-          {status === 'init' && (
-            <div className="flex items-center justify-center gap-2 text-blue-400">
-              <div className="w-2 h-2 bg-blue-400 rounded-full animate-pulse" />
-              Conectando...
-            </div>
-          )}
-          {status === 'waiting' && (
-            <div className="space-y-2">
-              <div className="flex items-center justify-center gap-2 text-green-400">
-                <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse" />
-                En cola de verificacion
+        {/* Info de estado */}
+        <Card className="w-full max-w-md bg-gray-900/80 border-gray-700 text-center">
+          <CardContent className="pt-6 pb-6 space-y-3">
+            {status === 'init' && (
+              <div className="flex items-center justify-center gap-2 text-blue-400">
+                <div className="w-2 h-2 bg-blue-400 rounded-full animate-pulse" />
+                Conectando al servidor P2P...
               </div>
-              {position > 0 && <p className="text-gray-300">Posicion: <span className="text-purple-400 font-bold">#{position}</span></p>}
-            </div>
-          )}
-          {status === 'error' && (
-            <div className="space-y-2">
-              <div className="flex items-center justify-center gap-2 text-red-400">
-                <div className="w-2 h-2 bg-red-400 rounded-full" />
-                Error de conexion
+            )}
+            {status === 'waiting' && (
+              <div className="space-y-2">
+                <div className="flex items-center justify-center gap-2 text-green-400">
+                  <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse" />
+                  En cola de verificacion
+                </div>
+                {position > 0 && <p className="text-gray-300">Posicion: <span className="text-purple-400 font-bold">#{position}</span></p>}
+                {position === 0 && <p className="text-purple-400 font-medium">Eres el siguiente!</p>}
               </div>
-              <p className="text-gray-500 text-xs">Asegurate de tener camara y buena conexion</p>
-            </div>
-          )}
-          <Button variant="outline" className="text-gray-400 border-gray-600" onClick={handleExit}>Volver atras</Button>
-        </CardContent>
-      </Card>
+            )}
+            {status === 'error' && (
+              <div className="space-y-2">
+                <div className="flex items-center justify-center gap-2 text-red-400">
+                  <div className="w-2 h-2 bg-red-400 rounded-full" />
+                  Error de conexion
+                </div>
+                <p className="text-gray-500 text-xs">Asegurate de tener camara y buena conexion</p>
+              </div>
+            )}
+            <p className="text-yellow-400 text-sm font-medium">Prepara tu identificacion</p>
+            <p className="text-gray-500 text-xs">Cuando un administrador se conecte, se iniciara la verificacion por video</p>
+          </CardContent>
+        </Card>
+      </main>
     </div>
   )
 }
@@ -390,16 +440,17 @@ function VerificationVideoView() {
   useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [verificationMessages])
 
   useEffect(() => {
-    if (!globalPeer || !verificationAdminPeerId) {
-      setStatusMsg('Error: no se encontro la conexion. Volviendo...')
-      setTimeout(() => { if (mounted) useDhobbytvStore.getState().setView('verification') }, 2000)
-      return
-    }
     let mounted = true
 
     // Mostrar video local
     if (localVideoRef.current && globalStream) {
       localVideoRef.current.srcObject = globalStream
+    }
+
+    if (!globalPeer || !verificationAdminPeerId) {
+      setStatusMsg('Error: no se encontro la conexion. Volviendo...')
+      setTimeout(() => { if (mounted) useDhobbytvStore.getState().setView('verification') }, 2000)
+      return () => { mounted = false }
     }
 
     // 1. Conectar data channel con el admin (chat)
