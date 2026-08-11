@@ -352,6 +352,8 @@ function VerificationView() {
             setVideoConnected(true)
             setStatusMsg('Video conectado. Muestra tu identificacion.')
             addVerificationMessage('Sistema', 'Video conectado con el administrador.')
+            // Silenciar audio del admin (el usuario no escucha al admin por defecto)
+            remoteStream.getAudioTracks().forEach(t => { t.enabled = false })
             if (remoteVideoRef.current) remoteVideoRef.current.srcObject = remoteStream
           })
 
@@ -415,8 +417,9 @@ function VerificationView() {
         </div>
 
         <div className="relative rounded-xl overflow-hidden bg-black flex-1 min-h-0" style={{ minHeight: '300px' }}>
-          <video ref={remoteVideoRef} autoPlay playsInline className="w-full h-full object-cover" />
-          {!videoConnected && (
+          <video ref={localVideoRef} autoPlay playsInline muted style={{ transform: 'scaleX(-1)' }} className="w-full h-full object-cover" />
+          <video ref={remoteVideoRef} autoPlay playsInline muted className="w-full h-full object-cover hidden" />
+          {!cameraReady && (
             <div className="absolute inset-0 flex items-center justify-center">
               {phase === 'waiting' ? (
                 <div className="text-center"><div className="w-12 h-12 border-3 border-green-400 border-t-transparent rounded-full animate-spin mx-auto mb-3" /><p className="text-gray-300">Esperando administrador...</p><p className="text-gray-500 text-xs mt-1">Prepara tu identificacion</p></div>
@@ -424,17 +427,15 @@ function VerificationView() {
                 <div className="text-center"><div className="w-10 h-10 border-2 border-blue-400 border-t-transparent rounded-full animate-spin mx-auto mb-3" /><p className="text-gray-300">Estableciendo video...</p></div>
               ) : phase === 'error' ? (
                 <div className="text-center"><p className="text-red-400 text-lg">Error de conexion</p></div>
-              ) : null}
-            </div>
-          )}
-          {cameraReady && (
-            <div className="absolute bottom-3 right-3 w-28 h-20 sm:w-36 sm:h-24 rounded-lg overflow-hidden border-2 border-green-500 shadow-lg">
-              <video ref={localVideoRef} autoPlay playsInline muted style={{ transform: 'scaleX(-1)' }} className="w-full h-full object-cover" />
+              ) : (
+                <div className="text-center"><div className="w-12 h-12 border-3 border-gray-400 border-t-transparent rounded-full animate-spin mx-auto mb-3" /><p className="text-gray-300">Activando camara...</p></div>
+              )}
             </div>
           )}
           <div className="absolute bottom-3 left-3 bg-green-600/90 text-white text-xs px-2 py-1 rounded-full flex items-center gap-1">
             <div className="w-1.5 h-1.5 bg-white rounded-full animate-pulse" />{cameraReady ? 'CAMARA ON' : 'SIN CAMARA'}
           </div>
+          {videoConnected && <div className="absolute bottom-3 right-3 bg-blue-600/90 text-white text-xs px-2 py-1 rounded-full flex items-center gap-1"><div className="w-1.5 h-1.5 bg-white rounded-full animate-pulse" />ADMIN CONECTADO</div>}
         </div>
 
         {phase === 'connected' && (
@@ -467,6 +468,7 @@ function AdminVerificationView() {
   const addVerificationMessage = useDhobbytvStore((s) => s.addVerificationMessage)
 
   const [adminCameraOn, setAdminCameraOn] = useState(false)
+  const [adminMicOn, setAdminMicOn] = useState(false)
   const [chatInput, setChatInput] = useState('')
   const [statusMsg, setStatusMsg] = useState('Conectando con usuario...')
 
@@ -475,6 +477,7 @@ function AdminVerificationView() {
   const dataConnRef = useRef<any>(null)
   const mediaCallRef = useRef<any>(null)
   const adminStreamRef = useRef<MediaStream | null>(null)
+  const adminAudioTrackRef = useRef<MediaStreamTrack | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [verificationMessages])
@@ -490,19 +493,15 @@ function AdminVerificationView() {
     console.log('[ADMIN-VERIFY] Mi peer:', globalPeer.id, 'destruido:', globalPeer.destroyed)
     setStatusMsg('Conectando con ' + verificationTarget.username + '...')
 
-    // 1. Pedir camara EN PARALELO con la conexion de datos
+    // 1. Pedir SOLO video para el admin (audio desactivado por defecto)
     const streamPromise = (async () => {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false })
         console.log('[ADMIN-VERIFY] Camara obtenida, tracks:', stream.getTracks().length)
         return stream
       } catch (err) {
-        console.warn('[ADMIN-VERIFY] Sin camara, intentando solo audio:', err)
-        try {
-          return await navigator.mediaDevices.getUserMedia({ video: false, audio: true })
-        } catch {
-          return new MediaStream()
-        }
+        console.warn('[ADMIN-VERIFY] Sin camara:', err)
+        return new MediaStream()
       }
     })()
 
@@ -666,6 +665,38 @@ function AdminVerificationView() {
     }
   }
 
+  const toggleAdminMic = async () => {
+    if (adminMicOn) {
+      // Apagar microfono: quitar audio track del peer connection
+      adminAudioTrackRef.current?.stop()
+      adminAudioTrackRef.current = null
+      try {
+        const pc = mediaCallRef.current?.peerConnection
+        if (pc) {
+          const senders = pc.getSenders()
+          senders.forEach(s => {
+            if (s.track?.kind === 'audio') { pc.removeTrack(s) }
+          })
+        }
+      } catch {}
+      setAdminMicOn(false)
+      return
+    }
+    // Encender microfono: pedir audio y agregar al peer connection
+    try {
+      const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const audioTrack = audioStream.getAudioTracks()[0]
+      adminAudioTrackRef.current = audioTrack
+      try {
+        const pc = mediaCallRef.current?.peerConnection
+        if (pc) { pc.addTrack(audioTrack, audioStream) }
+      } catch {}
+      setAdminMicOn(true)
+    } catch {
+      toast.error('No se pudo acceder al microfono')
+    }
+  }
+
   const handleAccept = () => {
     const dataConn = dataConnRef.current
     if (dataConn && dataConn.open) {
@@ -701,6 +732,8 @@ function AdminVerificationView() {
     try { dataConnRef.current?.close() } catch {}
     try { mediaCallRef.current?.close() } catch {}
     stopStream(adminStreamRef.current)
+    adminAudioTrackRef.current?.stop()
+    adminAudioTrackRef.current = null
     adminStreamRef.current = null
     dataConnRef.current = null
     mediaCallRef.current = null
@@ -728,13 +761,16 @@ function AdminVerificationView() {
               <Badge className="bg-yellow-600">NO VERIFICADO</Badge>
             </div>
             <div className="flex gap-2">
+              <Button size="sm" variant="outline" className={adminMicOn ? 'text-green-400 border-green-400' : 'text-gray-400'} onClick={toggleAdminMic}>
+                {adminMicOn ? 'Mic ON' : 'Mic OFF'}
+              </Button>
               <Button size="sm" variant="outline" className={adminCameraOn ? 'text-red-400 border-red-400' : 'text-gray-400'} onClick={toggleAdminCamera}>
                 {adminCameraOn ? 'Apagar mi camara' : 'Prender mi camara'}
               </Button>
             </div>
           </div>
           <div className="relative rounded-xl overflow-hidden bg-black flex-1 min-h-0">
-            <video ref={remoteVideoRef} autoPlay playsInline className="w-full h-full object-cover" />
+            <video ref={remoteVideoRef} autoPlay playsInline style={{ transform: 'scaleX(-1)' }} className="w-full h-full object-cover" />
             <div id="admin-remote-video-placeholder" className="absolute inset-0 flex items-center justify-center pointer-events-none transition-opacity duration-500">
               <div className="text-center">
                 <div className="w-8 h-8 border-2 border-green-400 border-t-transparent rounded-full animate-spin mx-auto mb-2" />
