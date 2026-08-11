@@ -71,6 +71,21 @@ export async function POST(request: Request) {
     const { action, peerId, username, gender } = body
 
     if (action === 'join' && peerId && username) {
+      // Borrar entradas previas del mismo usuario (evita duplicados al salir/volver)
+      try {
+        const { data: existing } = await supabase
+          .from('announcement')
+          .select('id, text')
+          .like('id', QUEUE_PREFIX + '%')
+          .eq('active', true)
+        if (existing && existing.length > 0) {
+          const toDelete = existing.filter((d: any) => parseQueueData(d.text).username === username)
+          if (toDelete.length > 0) {
+            await supabase.from('announcement').delete().in('id', toDelete.map((d: any) => d.id))
+          }
+        }
+      } catch {}
+
       const queueData = JSON.stringify({ username, gender: gender || 'unknown' })
       const { error } = await supabase.from('announcement').upsert({
         id: toQueueId(peerId),

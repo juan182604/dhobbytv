@@ -269,34 +269,16 @@ function VerificationView() {
         console.log('[VERIFY] Peer abierto:', peer.id)
 
         try {
-          // Pedir camara primero
-          const videoStream = await navigator.mediaDevices.getUserMedia({ video: true })
-          if (!mounted) { stopStream(videoStream); return }
-          if (localVideoRef.current) { localVideoRef.current.srcObject = videoStream }
+          const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+          if (!mounted) { stopStream(stream); return }
+          setGlobalStream(stream)
+          if (localVideoRef.current) { localVideoRef.current.srcObject = stream }
           setCameraReady(true)
-          console.log('[VERIFY] Camara lista')
-
-          // Pedir microfono por separado (fuerza dialogo de permiso)
-          let micStream: MediaStream | null = null
-          try {
-            micStream = await navigator.mediaDevices.getUserMedia({ audio: true })
-            console.log('[VERIFY] Microfono listo, tracks:', micStream.getAudioTracks().length)
-            if (mounted) setMicReady(true)
-          } catch (micErr) {
-            console.warn('[VERIFY] Mic no disponible:', micErr)
-            if (mounted) toast.warning('No se pudo acceder al microfono. El admin no te escuchara.')
-          }
-
-          // Combinar video + audio en un solo stream
-          const combined = new MediaStream([
-            ...videoStream.getVideoTracks(),
-            ...(micStream ? micStream.getAudioTracks() : []),
-          ])
-          setGlobalStream(combined)
-          console.log('[VERIFY] Stream combinido listo, tracks:', combined.getTracks().map(t => t.kind))
+          setMicReady(stream.getAudioTracks().length > 0)
+          console.log('[VERIFY] Stream lista, tracks:', stream.getTracks().map(t => t.kind))
         } catch (err) {
-          console.error('[VERIFY] Error camara:', err)
-          if (mounted) { toast.error('No se pudo acceder a la camara'); setPhase('error') }
+          console.error('[VERIFY] Error camara/mic:', err)
+          if (mounted) { toast.error('No se pudo acceder a la camara o microfono'); setPhase('error') }
           return
         }
 
@@ -520,11 +502,15 @@ function AdminVerificationView() {
     console.log('[ADMIN-VERIFY] Mi peer:', globalPeer.id, 'destruido:', globalPeer.destroyed)
     setStatusMsg('Conectando con ' + verificationTarget.username + '...')
 
-    // 1. Pedir SOLO video para el admin (audio desactivado por defecto)
+    // 1. Pedir video + audio para el admin, pero silenciar el audio
+    // El audio se necesita en el SDP offer para que el usuario pueda enviar audio
     const streamPromise = (async () => {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false })
-        console.log('[ADMIN-VERIFY] Camara obtenida, tracks:', stream.getTracks().length)
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+        // Silenciar audio del admin (no envia sonido, pero mantiene la linea de audio en SDP)
+        stream.getAudioTracks().forEach(t => { t.enabled = false })
+        console.log('[ADMIN-VERIFY] Stream obtenida, tracks:', stream.getTracks().map(t => t.kind + '(enabled=' + t.enabled + ')'))
+        adminAudioTrackRef.current = stream.getAudioTracks()[0] || null
         return stream
       } catch (err) {
         console.warn('[ADMIN-VERIFY] Sin camara:', err)
@@ -692,36 +678,16 @@ function AdminVerificationView() {
     }
   }
 
-  const toggleAdminMic = async () => {
-    if (adminMicOn) {
-      // Apagar microfono: quitar audio track del peer connection
-      adminAudioTrackRef.current?.stop()
-      adminAudioTrackRef.current = null
-      try {
-        const pc = mediaCallRef.current?.peerConnection
-        if (pc) {
-          const senders = pc.getSenders()
-          senders.forEach(s => {
-            if (s.track?.kind === 'audio') { pc.removeTrack(s) }
-          })
-        }
-      } catch {}
-      setAdminMicOn(false)
+  const toggleAdminMic = () => {
+    const track = adminAudioTrackRef.current
+    if (!track) {
+      toast.error('No hay track de audio disponible')
       return
     }
-    // Encender microfono: pedir audio y agregar al peer connection
-    try {
-      const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true })
-      const audioTrack = audioStream.getAudioTracks()[0]
-      adminAudioTrackRef.current = audioTrack
-      try {
-        const pc = mediaCallRef.current?.peerConnection
-        if (pc) { pc.addTrack(audioTrack, audioStream) }
-      } catch {}
-      setAdminMicOn(true)
-    } catch {
-      toast.error('No se pudo acceder al microfono')
-    }
+    const newState = !track.enabled
+    track.enabled = newState
+    setAdminMicOn(newState)
+    console.log('[ADMIN-VERIFY] Mic', newState ? 'ON' : 'OFF')
   }
 
   const handleAccept = () => {
