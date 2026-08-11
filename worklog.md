@@ -1,88 +1,48 @@
-# dhobbytv - Worklog
+# Worklog - DhobbyTV Fixes
 
 ---
 Task ID: 1
-Agent: Main Agent
-Task: Build dhobbytv - Omegle clone with registration, age verification, country filter, P2P video+chat
+Agent: Main
+Task: Fix verify-queue flickering (users disappear/reappear every 10s)
 
 Work Log:
-- Configured Prisma schema with User, Report, Ban models
-- Installed bcryptjs and socket.io-client
-- Created Socket.io mini-service (port 3003) for matchmaking, verification queue, and WebRTC signaling
-- Created API routes: register, login, verify-user, delete-user, report, geoip, admin-stats, setup-admin
-- Created auth library with bcrypt password hashing
-- Created Zustand store for app state management
-- Created countries/hobbies data with flags and labels
-- Built complete DhobbytvApp component with all views:
-  - Login view (username + password)
-  - Register view (username + password + gender)
-  - Verification queue view (waiting for admin)
-  - Verification video view (P2P with admin, shows user camera only)
-  - Admin panel (stats, verification queue ordered by time, video verification, accept/reject)
-  - Main view (country filter, hobby selection, search, P2P video + chat via WebRTC data channel)
-- Verified login page renders correctly
-- Verified registration flow works (creates user, redirects to verification)
-- Verified admin panel loads with stats
-- IP geolocation via ip-api.com for country detection
+- Identified root cause: Vercel serverless functions don't share memory. The verify-queue used an in-memory Map, so different instances had different queue data.
+- Created VerifyQueue model in Prisma schema
+- Rewrote /api/verify-queue to use Supabase PostgreSQL instead of in-memory Map
+- Added self-healing: API auto-creates the verify_queue table via pg package if it doesn't exist
+- Updated /api/setup-admin to also auto-create the verify_queue table
+- Created /api/setup-verify-queue as a standalone table creation endpoint
 
 Stage Summary:
-- Full dhobbytv prototype built and running
-- Admin credentials: admin / admin123
-- All features implemented: registration, login, verification P2P, admin panel, country filter, P2P video+chat
-- No chat or video data is stored - everything is live P2P
-- User data is minimal (~165 bytes per user)
----
-Task ID: 1
-Agent: main
-Task: Fix P2P video verification connection between admin and user
+- Queue now persists in Supabase PostgreSQL across ALL Vercel instances
+- No more flickering - every instance sees the same data
+- Auto-creates table on first use via pg + DATABASE_URL
 
-Work Log:
-- Diagnosed ROOT CAUSE: Vercel serverless has separate memory per instance. The admin's signal (POST /api/verify-queue?action=signal) and user's check (POST /api/verify-queue?action=check) were going to DIFFERENT serverless instances, so the user NEVER received the adminPeerId
-- Removed the signal/check API flow entirely
-- User's VerificationView now listens for incoming PeerJS connections (peer.on('connection') and peer.on('call')) DIRECTLY from admin
-- When user receives incoming connection, saves to global pending variables (pendingVerifyDataConn, pendingVerifyCall, pendingVerifyRemoteStream)
-- User auto-switches to verification-video view when BOTH data channel and remote stream are ready
-- VerificationVideoView rewrites to use pending connections instead of creating new ones
-- Admin's AdminVerificationView now connects DIRECTLY via PeerJS (peer.connect + peer.call) without API intermediary
-- Added multiple STUN servers (5x Google + stunprotocol) and TURN servers (metered.ca) with iceCandidatePoolSize: 10
-- Added comprehensive console.log debugging throughout the flow
-- Added connecting status state for user view
-- Added video placeholder with spinner for admin view
-- Mirror mode already present (scaleX(-1)) on both user local video and admin local video
-- Both AdminView and SuperAdminView handleJoinVerification simplified (removed API signal)
-- Build passes successfully
-
-Stage Summary:
-- Completely eliminated the Vercel serverless memory split issue by removing API intermediary
-- P2P flow is now: Admin clicks join -> AdminVerificationView connects DIRECTLY to user's PeerJS peer -> user's peer.on('connection') and peer.on('call') fire -> user auto-transitions to video view
-- Added ICE/TURN servers for better connectivity through NATs/firewalls
-- Added debug logging for troubleshooting
 ---
 Task ID: 2
-Agent: main
-Task: Fix P2P video, chat, and admin stats - complete rewrite of verification flow
+Agent: Main
+Task: Fix stats disappearing in SuperAdminView
 
 Work Log:
-- Diagnosed 3 root causes:
-  1. CRITICAL: VerificationView cleanup set pendingVerifyDataConn/call/stream = null when transitioning to verification-video, killing all connections
-  2. Chat messages not arriving because data connection was destroyed in view transition
-  3. Admin stats disappearing because useState([]) resets on remount after admin-verification
-- ELIMINATED VerificationVideoView entirely
-- Rewrote VerificationView as SINGLE unified view (like a video call):
-  - Phase 1 (init): Connecting to P2P server
-  - Phase 2 (waiting): In queue, camera active, waiting for admin (shows spinner)
-  - Phase 3 (connected): Admin connected, video + chat in same view (NO view transition)
-  - Phase 4 (error): Connection error
-- User stays in 'verification' view the ENTIRE time - no view switches, no lost connections
-- When admin connects (peer.on('connection') + peer.on('call')), the SAME component handles it
-- Chat appears when connected, video appears when stream arrives - all in-place
-- Added cachedAdminData global variable for admin panel stats
-- Both AdminView and SuperAdminView initialize from cache and save to cache on load
-- Removed 'verification-video' from AppView type and route mapping
-- Removed verification from persistence exclusion list (user can safely refresh in verification view)
-- Build passes successfully
+- Found that SuperAdminView was fetching `/api/stats` but the actual API route is at `/api/admin-stats`
+- The fetch was failing silently (`.catch(() => ({}))`), returning empty object
+- Fixed URL to `/api/admin-stats`
 
 Stage Summary:
-- Single-view verification like a video call: no transitions, no lost connections
-- Admin stats cached in global variable, survive view changes
-- Chat and video both handled in-place without component remounting
+- Stats will now load correctly from the database
+- Used in SuperAdminView's `loadAdminData()` function
+
+---
+Task ID: 3
+Agent: Main
+Task: Deploy
+
+Work Log:
+- Built successfully (all routes compile)
+- Committed and pushed to GitHub (juan182604/dhobbytv)
+- Vercel auto-deploys from GitHub
+
+Stage Summary:
+- Changes pushed to GitHub, Vercel will auto-deploy
+- **IMPORTANT**: User must visit /api/setup-admin OR /api/setup-verify-queue once after deploy to create the verify_queue table in Supabase
+- This requires DATABASE_URL (PostgreSQL) to be set in Vercel environment variables
