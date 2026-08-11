@@ -122,7 +122,10 @@ export const useDhobbytvStore = create<DhobbytvState>()(
       name: 'dhobbytv-session',
       partialize: (state) => ({
         user: state.user,
-        view: state.view,
+        // No persistir vistas P2P que requieren conexiones vivas
+        view: ['verification', 'verification-video', 'admin-verification', 'chat'].includes(state.view)
+          ? (state.user?.isAdmin || state.user?.isSuperAdmin ? 'admin' : state.user?.verified ? 'main' : 'verification-pending')
+          : state.view,
         country: state.country,
         countryCode: state.countryCode,
       }),
