@@ -57,3 +57,32 @@ Stage Summary:
 - P2P flow is now: Admin clicks join -> AdminVerificationView connects DIRECTLY to user's PeerJS peer -> user's peer.on('connection') and peer.on('call') fire -> user auto-transitions to video view
 - Added ICE/TURN servers for better connectivity through NATs/firewalls
 - Added debug logging for troubleshooting
+---
+Task ID: 2
+Agent: main
+Task: Fix P2P video, chat, and admin stats - complete rewrite of verification flow
+
+Work Log:
+- Diagnosed 3 root causes:
+  1. CRITICAL: VerificationView cleanup set pendingVerifyDataConn/call/stream = null when transitioning to verification-video, killing all connections
+  2. Chat messages not arriving because data connection was destroyed in view transition
+  3. Admin stats disappearing because useState([]) resets on remount after admin-verification
+- ELIMINATED VerificationVideoView entirely
+- Rewrote VerificationView as SINGLE unified view (like a video call):
+  - Phase 1 (init): Connecting to P2P server
+  - Phase 2 (waiting): In queue, camera active, waiting for admin (shows spinner)
+  - Phase 3 (connected): Admin connected, video + chat in same view (NO view transition)
+  - Phase 4 (error): Connection error
+- User stays in 'verification' view the ENTIRE time - no view switches, no lost connections
+- When admin connects (peer.on('connection') + peer.on('call')), the SAME component handles it
+- Chat appears when connected, video appears when stream arrives - all in-place
+- Added cachedAdminData global variable for admin panel stats
+- Both AdminView and SuperAdminView initialize from cache and save to cache on load
+- Removed 'verification-video' from AppView type and route mapping
+- Removed verification from persistence exclusion list (user can safely refresh in verification view)
+- Build passes successfully
+
+Stage Summary:
+- Single-view verification like a video call: no transitions, no lost connections
+- Admin stats cached in global variable, survive view changes
+- Chat and video both handled in-place without component remounting

@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 
-export type AppView = 'login' | 'register' | 'verification-pending' | 'verification' | 'verification-video' | 'admin' | 'admin-verification' | 'super-admin' | 'main' | 'chat'
+export type AppView = 'login' | 'register' | 'verification-pending' | 'verification' | 'admin' | 'admin-verification' | 'super-admin' | 'main' | 'chat'
 
 interface UserInfo {
   id: string
@@ -123,7 +123,7 @@ export const useDhobbytvStore = create<DhobbytvState>()(
       partialize: (state) => ({
         user: state.user,
         // No persistir vistas P2P que requieren conexiones vivas
-        view: ['verification', 'verification-video', 'admin-verification', 'chat'].includes(state.view)
+        view: ['admin-verification', 'chat'].includes(state.view)
           ? (state.user?.isAdmin || state.user?.isSuperAdmin ? 'admin' : state.user?.verified ? 'main' : 'verification-pending')
           : state.view,
         country: state.country,
