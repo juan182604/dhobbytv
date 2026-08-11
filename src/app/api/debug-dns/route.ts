@@ -1,39 +1,30 @@
 import { NextResponse } from 'next/server'
-import pg from 'pg'
+import { getSupabaseClient } from '@/lib/db'
 
 export async function GET() {
-  const results: Record<string, any> = {}
-  const dbUrl = process.env.DATABASE_URL || ''
+  const supabase = getSupabaseClient()
   
-  // Mostrar estructura de la URL sin revelar todo
-  const urlObj = new URL(dbUrl.replace('postgresql://', 'http://'))
-  results.dbUser = urlObj.username
-  results.dbPasswordLength = urlObj.password.length
-  results.dbHost = urlObj.hostname
-  results.dbPort = urlObj.port
-  results.dbName = urlObj.pathname.replace('/', '')
+  // Intentar seleccionar de verify_queue para ver si existe
+  const { data, error } = await supabase.from('verify_queue').select('peerId').limit(1)
   
-  // Probar pooler con SSL y mostrar error detallado
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || ''
-  const refMatch = supabaseUrl.match(/https?:\/\/([^.]+)\.supabase\.co/)
-  const ref = refMatch ? refMatch[1] : ''
-  
-  if (ref && urlObj.password) {
-    const poolerUrl = `postgresql://postgres.${ref}:${urlObj.password}@aws-0-us-east-1.pooler.supabase.com:6543/postgres`
-    try {
-      const client = new pg.Client({ 
-        connectionString: poolerUrl,
-        ssl: { rejectUnauthorized: false },
-        connectionTimeoutMillis: 10000
-      })
-      await client.connect()
-      const res = await client.query('SELECT 1 as test')
-      results.poolerTest = 'OK: ' + JSON.stringify(res.rows[0])
-      await client.end()
-    } catch (e: any) {
-      results.poolerTest = 'ERROR: ' + (e.code || '') + ' - ' + (e.message || '').substring(0, 200)
-    }
-  }
+  // Tambien intentar insertar una fila de prueba
+  const testResult = await supabase.from('verify_queue').upsert({
+    peerId: '__test__',
+    username: '__test__',
+    gender: 'test',
+    joinedAt: Date.now(),
+    adminPeerId: null,
+  }, { onConflict: 'peerId' })
 
-  return NextResponse.json(results)
+  // Limpiar la fila de prueba
+  if (!testResult.error) {
+    await supabase.from('verify_queue').delete().eq('peerId', '__test__')
+  }
+  
+  return NextResponse.json({
+    selectError: error ? { code: error.code, message: error.message } : 'OK - tabla existe',
+    upsertError: testResult.error ? { code: testResult.error.code, message: testResult.error.message } : 'OK - insert funciona',
+    tableExists: !error,
+    insertWorks: !testResult.error,
+  })
 }
