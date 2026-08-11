@@ -220,6 +220,7 @@ function VerificationView() {
   const [statusMsg, setStatusMsg] = useState('Conectando al servidor P2P...')
   const [chatInput, setChatInput] = useState('')
   const [cameraReady, setCameraReady] = useState(false)
+  const [micReady, setMicReady] = useState(false)
   const [videoConnected, setVideoConnected] = useState(false)
 
   const peerIdRef = useRef<string>('')
@@ -268,13 +269,31 @@ function VerificationView() {
         console.log('[VERIFY] Peer abierto:', peer.id)
 
         try {
-          const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
-          if (!mounted) { stopStream(stream); return }
-          setGlobalStream(stream)
-          // Asignar directamente al video local
-          if (localVideoRef.current) { localVideoRef.current.srcObject = stream }
+          // Pedir camara primero
+          const videoStream = await navigator.mediaDevices.getUserMedia({ video: true })
+          if (!mounted) { stopStream(videoStream); return }
+          if (localVideoRef.current) { localVideoRef.current.srcObject = videoStream }
           setCameraReady(true)
           console.log('[VERIFY] Camara lista')
+
+          // Pedir microfono por separado (fuerza dialogo de permiso)
+          let micStream: MediaStream | null = null
+          try {
+            micStream = await navigator.mediaDevices.getUserMedia({ audio: true })
+            console.log('[VERIFY] Microfono listo, tracks:', micStream.getAudioTracks().length)
+            if (mounted) setMicReady(true)
+          } catch (micErr) {
+            console.warn('[VERIFY] Mic no disponible:', micErr)
+            if (mounted) toast.warning('No se pudo acceder al microfono. El admin no te escuchara.')
+          }
+
+          // Combinar video + audio en un solo stream
+          const combined = new MediaStream([
+            ...videoStream.getVideoTracks(),
+            ...(micStream ? micStream.getAudioTracks() : []),
+          ])
+          setGlobalStream(combined)
+          console.log('[VERIFY] Stream combinido listo, tracks:', combined.getTracks().map(t => t.kind))
         } catch (err) {
           console.error('[VERIFY] Error camara:', err)
           if (mounted) { toast.error('No se pudo acceder a la camara'); setPhase('error') }
@@ -435,8 +454,13 @@ function VerificationView() {
               )}
             </div>
           )}
-          <div className="absolute bottom-3 left-3 bg-green-600/90 text-white text-xs px-2 py-1 rounded-full flex items-center gap-1">
-            <div className="w-1.5 h-1.5 bg-white rounded-full animate-pulse" />{cameraReady ? 'CAMARA ON' : 'SIN CAMARA'}
+          <div className="absolute bottom-3 left-3 flex gap-2">
+            <div className="bg-green-600/90 text-white text-xs px-2 py-1 rounded-full flex items-center gap-1">
+              <div className="w-1.5 h-1.5 bg-white rounded-full animate-pulse" />{cameraReady ? 'CAMARA ON' : 'SIN CAMARA'}
+            </div>
+            <div className={`${micReady ? 'bg-green-600/90' : 'bg-red-600/90'} text-white text-xs px-2 py-1 rounded-full flex items-center gap-1">
+              <div className="w-1.5 h-1.5 bg-white rounded-full" />{micReady ? 'MIC ON' : 'MIC OFF'}
+            </div>
           </div>
           {videoConnected && <div className="absolute bottom-3 right-3 bg-blue-600/90 text-white text-xs px-2 py-1 rounded-full flex items-center gap-1"><div className="w-1.5 h-1.5 bg-white rounded-full animate-pulse" />ADMIN CONECTADO</div>}
         </div>
