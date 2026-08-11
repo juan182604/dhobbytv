@@ -271,6 +271,9 @@ function VerificationView() {
           const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
           if (!mounted) { stopStream(stream); return }
           setGlobalStream(stream)
+          // Asignar directamente al video local
+          if (localVideoRef.current) { localVideoRef.current.srcObject = stream }
+          setCameraReady(true)
           console.log('[VERIFY] Camara lista')
         } catch (err) {
           console.error('[VERIFY] Error camara:', err)
@@ -417,8 +420,8 @@ function VerificationView() {
         </div>
 
         <div className="relative rounded-xl overflow-hidden bg-black flex-1 min-h-0" style={{ minHeight: '300px' }}>
-          <video ref={localVideoRef} autoPlay playsInline muted style={{ transform: 'scaleX(-1)' }} className="w-full h-full object-cover" />
-          <video ref={remoteVideoRef} autoPlay playsInline muted className="w-full h-full object-cover hidden" />
+          <video ref={localVideoRef} autoPlay playsInline muted style={{ transform: 'scaleX(-1)' }} className="absolute inset-0 w-full h-full object-cover" />
+          <video ref={remoteVideoRef} autoPlay playsInline muted className="absolute inset-0 w-full h-full object-cover opacity-0 pointer-events-none" />
           {!cameraReady && (
             <div className="absolute inset-0 flex items-center justify-center">
               {phase === 'waiting' ? (
@@ -770,7 +773,7 @@ function AdminVerificationView() {
             </div>
           </div>
           <div className="relative rounded-xl overflow-hidden bg-black flex-1 min-h-0">
-            <video ref={remoteVideoRef} autoPlay playsInline style={{ transform: 'scaleX(-1)' }} className="w-full h-full object-cover" />
+            <video ref={remoteVideoRef} autoPlay playsInline style={{ transform: 'scaleX(-1)' }} className="absolute inset-0 w-full h-full object-cover" />
             <div id="admin-remote-video-placeholder" className="absolute inset-0 flex items-center justify-center pointer-events-none transition-opacity duration-500">
               <div className="text-center">
                 <div className="w-8 h-8 border-2 border-green-400 border-t-transparent rounded-full animate-spin mx-auto mb-2" />
