@@ -461,6 +461,7 @@ function VerificationVideoView() {
       if (!mounted) return
       setStatusMsg('Conectado con admin. Muestra tu identificacion.')
       dataConn.send(JSON.stringify({ type: 'verify-user-info', username: user?.username, gender: user?.gender }))
+      addVerificationMessage('Sistema', 'Conectado con el administrador. Puedes escribir mensajes abajo.')
     })
 
     dataConn.on('data', (raw: any) => {
@@ -494,7 +495,12 @@ function VerificationVideoView() {
       if (!mounted || !globalStream) return
       call.answer(globalStream)
       call.on('stream', (remoteStream: MediaStream) => {
-        if (remoteVideoRef.current && mounted) remoteVideoRef.current.srcObject = remoteStream
+        if (remoteVideoRef.current && mounted) {
+          remoteVideoRef.current.srcObject = remoteStream
+          // Ocultar placeholder cuando llega video
+          const ph = document.getElementById('remote-video-placeholder')
+          if (ph) ph.style.opacity = '0'
+        }
       })
     }
 
@@ -541,10 +547,10 @@ function VerificationVideoView() {
           </div>
           <div className="relative rounded-xl overflow-hidden bg-black flex-1 min-h-0">
             <video ref={remoteVideoRef} autoPlay playsInline className="w-full h-full object-cover" />
-            <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+            <div id="remote-video-placeholder" className="absolute inset-0 flex items-center justify-center pointer-events-none transition-opacity duration-500">
               <div className="text-center">
-                <div className="text-4xl mb-2">👨‍💼</div>
-                <p className="text-gray-400 text-sm">Camara del admin apagada</p>
+                <div className="w-8 h-8 border-2 border-blue-400 border-t-transparent rounded-full animate-spin mx-auto mb-2" />
+                <p className="text-gray-400 text-sm">Esperando video del administrador...</p>
               </div>
             </div>
             <div className="absolute bottom-3 right-3 w-32 h-24 sm:w-40 sm:h-30 rounded-lg overflow-hidden border-2 border-green-500 shadow-lg">
@@ -625,7 +631,25 @@ function AdminVerificationView() {
     // 2. Llamar al usuario (video) - admin inicia la llamada
     const makeCall = async () => {
       if (!globalPeer || !verificationTarget) return
-      const call = globalPeer.call(verificationTarget.peerId, adminStreamRef.current || new MediaStream())
+      // Pedir camara/micro del admin para que la llamada WebRTC tenga tracks
+      let callStream = adminStreamRef.current
+      if (!callStream) {
+        try {
+          callStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+          adminStreamRef.current = callStream
+          if (localVideoRef.current) localVideoRef.current.srcObject = callStream
+          setAdminCameraOn(true)
+        } catch {
+          // Si no hay camara, usar stream de audio solo para que el mic funcione
+          try {
+            callStream = await navigator.mediaDevices.getUserMedia({ video: false, audio: true })
+            adminStreamRef.current = callStream
+          } catch {
+            callStream = new MediaStream()
+          }
+        }
+      }
+      const call = globalPeer.call(verificationTarget.peerId, callStream)
       mediaCallRef.current = call
 
       call.on('stream', (remoteStream: MediaStream) => {
@@ -655,27 +679,57 @@ function AdminVerificationView() {
 
   const toggleAdminCamera = async () => {
     if (adminCameraOn) {
-      stopStream(adminStreamRef.current)
-      adminStreamRef.current = null
+      // Apagar camara: parar tracks de video, mantener audio
+      const stream = adminStreamRef.current
+      if (stream) {
+        stream.getVideoTracks().forEach(t => t.stop())
+        // Reemplazar video track por track mudo en la llamada
+        try {
+          const pc = mediaCallRef.current?.peerConnection
+          if (pc) {
+            const senders = pc.getSenders()
+            senders.forEach(s => {
+              if (s.track?.kind === 'video') {
+                const emptyStream = new MediaStream()
+                const blackCanvas = document.createElement('canvas')
+                blackCanvas.width = 2; blackCanvas.height = 2
+                const ctx = blackCanvas.getContext('2d')!.fillRect(0, 0, 2, 2)
+                const blackTrack = emptyStream.captureStream().getVideoTracks()[0]
+                s.replaceTrack(blackTrack)
+              }
+            })
+          }
+        } catch {}
+      }
       if (localVideoRef.current) localVideoRef.current.srcObject = null
       setAdminCameraOn(false)
-      // Reemplazar tracks en la llamada activa
-      try {
-        const sender = mediaCallRef.current?.peerConnection?.getSenders()?.[0]
-        if (sender) sender.replaceTrack(new MediaStream().getVideoTracks()[0] || null as any)
-      } catch {}
       return
     }
 
+    // Encender camara: agregar video al stream existente
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
-      adminStreamRef.current = stream
-      if (localVideoRef.current) localVideoRef.current.srcObject = stream
+      const videoStream = await navigator.mediaDevices.getUserMedia({ video: true })
+      const existingStream = adminStreamRef.current
+      if (existingStream) {
+        videoStream.getVideoTracks().forEach(t => existingStream.addTrack(t))
+        // No parar el audio stream
+      } else {
+        const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true }).catch(() => new MediaStream())
+        const combined = new MediaStream([...audioStream.getTracks(), ...videoStream.getVideoTracks()])
+        adminStreamRef.current = combined
+      }
+      if (localVideoRef.current) localVideoRef.current.srcObject = adminStreamRef.current
       setAdminCameraOn(true)
-      // Reemplazar tracks en la llamada activa
+      // Reemplazar video track en la llamada
       try {
-        const sender = mediaCallRef.current?.peerConnection?.getSenders()?.[0]
-        if (sender && stream.getVideoTracks()[0]) sender.replaceTrack(stream.getVideoTracks()[0])
+        const pc = mediaCallRef.current?.peerConnection
+        if (pc) {
+          const senders = pc.getSenders()
+          const newTrack = adminStreamRef.current?.getVideoTracks()[0]
+          senders.forEach(s => {
+            if (s.track?.kind === 'video' && newTrack) s.replaceTrack(newTrack)
+          })
+        }
       } catch {}
     } catch {
       toast.error('No se pudo acceder a la camara')
@@ -811,45 +865,50 @@ function AdminView() {
   }
 
   // PeerJS setup para admin (sin Gun.js para cola)
+  // NOTA: No destruimos el peer al desmontar porque puede volver de admin-verification
   useEffect(() => {
     let mounted = true
+    let unsubOnline: (() => void) | null = null
 
-    const setup = async () => {
-      const gun = await getGun()
-      if (!mounted) return
-      setGlobalGun(gun)
-
-      const peerId = genPeerId(user!.username + '_admin')
-      setGlobalPeerId(peerId)
-      const peer = createPeer(peerId)
-      setGlobalPeer(peer)
-
-      peer.on('open', () => {
+    // Si ya hay un peer activo, reutilizarlo
+    if (globalPeer && globalPeerId && !globalPeer.destroyed) {
+      setPeerReady(true)
+      if (globalGun) {
+        unsubOnline = watchOnlineCount(globalGun, (count) => { if (mounted) setOnlineCount(count) })
+      }
+    } else {
+      const setup = async () => {
+        const gun = await getGun()
         if (!mounted) return
-        setPeerReady(true)
-        goOnline(gun, peerId, { username: user!.username, gender: user!.gender, country: '', countryCode: '', verified: true, isAdmin: true })
-      })
+        setGlobalGun(gun)
 
-      peer.on('error', () => { if (mounted) setPeerReady(false) })
+        const peerId = genPeerId(user!.username + '_admin')
+        setGlobalPeerId(peerId)
+        const peer = createPeer(peerId)
+        setGlobalPeer(peer)
 
-      // Escuchar conteo online (Gun.js)
-      const unsub = watchOnlineCount(gun, (count) => { if (mounted) setOnlineCount(count) })
-      return unsub
+        peer.on('open', () => {
+          if (!mounted) return
+          setPeerReady(true)
+          goOnline(gun, peerId, { username: user!.username, gender: user!.gender, country: '', countryCode: '', verified: true, isAdmin: true })
+        })
+
+        peer.on('error', () => { if (mounted) setPeerReady(false) })
+
+        // Escuchar conteo online (Gun.js)
+        unsubOnline = watchOnlineCount(gun, (count) => { if (mounted) setOnlineCount(count) })
+      }
+
+      setup()
     }
 
-    let unsubOnline: (() => void) | null = null
-    setup().then((unsub) => { if (unsub) unsubOnline = unsub })
     loadAdminData()
     const refreshInterval = setInterval(loadAdminData, 5000) // cada 5s para cola rapida
 
     return () => {
       mounted = false
       clearInterval(refreshInterval)
-      if (unsubOnline) unsubOnline()
-      if (globalPeerId && globalGun) goOffline(globalGun, globalPeerId)
-      cleanupPeer(globalPeer)
-      setGlobalPeer(null)
-      setGlobalPeerId(null)
+      // NO destruimos peer/gun aqui - se reutilizan si volvemos rapido
     }
   }, [])
 
@@ -1030,32 +1089,41 @@ function SuperAdminView() {
   }
 
   // PeerJS setup para super admin (cola via API)
+  // NOTA: No destruimos el peer al desmontar porque puede volver de admin-verification
   useEffect(() => {
     let mounted = true
     let unsubOnline: (() => void) | null = null
 
-    const setup = async () => {
-      const gun = await getGun()
-      if (!mounted) return
-      setGlobalGun(gun)
-
-      const peerId = genPeerId(user!.username + '_super')
-      setGlobalPeerId(peerId)
-      const peer = createPeer(peerId)
-      setGlobalPeer(peer)
-
-      peer.on('open', () => {
+    // Si ya hay un peer activo, reutilizarlo
+    if (globalPeer && globalPeerId && !globalPeer.destroyed) {
+      setPeerReady(true)
+      if (globalGun) {
+        unsubOnline = watchOnlineCount(globalGun, (count) => { if (mounted) setOnlineCount(count) })
+      }
+    } else {
+      const setup = async () => {
+        const gun = await getGun()
         if (!mounted) return
-        setPeerReady(true)
-        goOnline(gun, peerId, { username: user!.username, gender: user!.gender, country: '', countryCode: '', verified: true, isAdmin: true })
-      })
+        setGlobalGun(gun)
 
-      peer.on('error', () => { if (mounted) setPeerReady(false) })
+        const peerId = genPeerId(user!.username + '_super')
+        setGlobalPeerId(peerId)
+        const peer = createPeer(peerId)
+        setGlobalPeer(peer)
 
-      unsubOnline = watchOnlineCount(gun, (count) => { if (mounted) setOnlineCount(count) })
+        peer.on('open', () => {
+          if (!mounted) return
+          setPeerReady(true)
+          goOnline(gun, peerId, { username: user!.username, gender: user!.gender, country: '', countryCode: '', verified: true, isAdmin: true })
+        })
+
+        peer.on('error', () => { if (mounted) setPeerReady(false) })
+
+        unsubOnline = watchOnlineCount(gun, (count) => { if (mounted) setOnlineCount(count) })
+      }
+      setup()
     }
 
-    setup()
     loadAdminData()
     loadAds()
     const refreshInterval = setInterval(() => { loadAdminData(); loadAds() }, 5000)
@@ -1063,11 +1131,7 @@ function SuperAdminView() {
     return () => {
       mounted = false
       clearInterval(refreshInterval)
-      if (unsubOnline) unsubOnline()
-      if (globalPeerId && globalGun) goOffline(globalGun, globalPeerId)
-      cleanupPeer(globalPeer)
-      setGlobalPeer(null)
-      setGlobalPeerId(null)
+      // NO destruimos peer/gun aqui - se reutilizan si volvemos rapido
     }
   }, [])
 
