@@ -29,12 +29,6 @@ import {
   joinSearching,
   leaveSearching,
   watchForMatch,
-  joinVerifyQueue,
-  leaveVerifyQueue,
-  watchVerifyQueue,
-  signalVerificationStart,
-  watchVerificationSignal,
-  clearVerificationSignal,
   cleanupPeer,
   stopStream,
 } from '@/lib/p2p'
@@ -209,17 +203,21 @@ function VerificationPendingView() {
   )
 }
 
-// ==================== VERIFICATION WAITING (en cola, camara lista, esperando admin via API + PeerJS) ====================
+// ==================== VERIFICATION WAITING (en cola, camara lista, esperando admin P2P directo) ====================
+// Variable global para guardar la conexion entrante del admin antes de cambiar de vista
+let pendingVerifyDataConn: any = null
+let pendingVerifyCall: any = null
+let pendingVerifyRemoteStream: MediaStream | null = null
+
 function VerificationView() {
   const user = useDhobbytvStore((s) => s.user)
-  const [status, setStatus] = useState<'init' | 'waiting' | 'error'>('init')
+  const [status, setStatus] = useState<'init' | 'waiting' | 'connecting' | 'error'>('init')
   const [position, setPosition] = useState(0)
   const [cameraReady, setCameraReady] = useState(false)
   const peerIdRef = useRef<string>('')
   const localVideoRef = useRef<HTMLVideoElement>(null)
 
   // Mostrar preview del stream en el video local
-  // Usamos un polling corto porque globalStream es una variable global mutable (no estado React)
   const streamCheckRef = useRef<ReturnType<typeof setInterval>>(null)
   useEffect(() => {
     streamCheckRef.current = setInterval(() => {
@@ -236,42 +234,47 @@ function VerificationView() {
 
   useEffect(() => {
     let mounted = true
-    let checkInterval: ReturnType<typeof setInterval>
     let heartbeatInterval: ReturnType<typeof setInterval>
 
     const setup = async () => {
-      // 1. Crear PeerJS (sin Gun.js)
+      // 1. Crear PeerJS
       const peerId = genPeerId(user!.username)
       peerIdRef.current = peerId
       setGlobalPeerId(peerId)
       const peer = createPeer(peerId)
       setGlobalPeer(peer)
 
+      console.log('[VERIFY-USER] Creando peer:', peerId)
+
       peer.on('error', (err) => {
-        console.error('PeerJS error:', err)
+        console.error('[VERIFY-USER] PeerJS error:', err.type, err)
         if (mounted) setStatus('error')
       })
 
       peer.on('open', async () => {
         if (!mounted) return
+        console.log('[VERIFY-USER] Peer abierto, ID:', peer.id)
 
         // 2. Obtener camara
         try {
           const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
           if (!mounted) { stopStream(stream); return }
           setGlobalStream(stream)
-        } catch {
+          console.log('[VERIFY-USER] Camara obtenida, tracks:', stream.getTracks().length)
+        } catch (err) {
+          console.error('[VERIFY-USER] Error camara:', err)
           if (mounted) { toast.error('No se pudo acceder a la camara'); setStatus('error') }
           return
         }
 
-        // 3. Agregarse a la cola via API
+        // 3. Agregarse a la cola via API (solo para que el admin vea la lista)
         try {
           await fetch('/api/verify-queue', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ action: 'join', peerId, username: user!.username, gender: user!.gender }),
           })
+          console.log('[VERIFY-USER] Agregado a la cola API')
         } catch {}
 
         if (!mounted) return
@@ -286,33 +289,87 @@ function VerificationView() {
           }).catch(() => {})
         }, 30000)
 
-        // 5. Poll cada 3s para ver si un admin se conecto
-        checkInterval = setInterval(async () => {
+        // 5. ESCUCHAR conexion directa del admin (DATA CHANNEL entrante)
+        // Cuando el admin hace peer.connect(userPeerId), esto se dispara AQUI
+        peer.on('connection', (conn) => {
+          console.log('[VERIFY-USER] Conexion de datos entrante de:', conn.peer)
           if (!mounted) return
-          try {
-            const res = await fetch('/api/verify-queue', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ action: 'check', peerId }),
-            })
-            const data = await res.json()
-            if (data.adminPeerId && mounted) {
-              // Admin se conecto - pasar a video
-              useDhobbytvStore.getState().setVerificationAdminPeerId(data.adminPeerId)
-              clearInterval(checkInterval)
-              clearInterval(heartbeatInterval)
+
+          pendingVerifyDataConn = conn
+          setStatus('connecting')
+
+          conn.on('open', () => {
+            console.log('[VERIFY-USER] Data channel abierto con admin')
+            if (!mounted) return
+            // Enviar info del usuario al admin
+            conn.send(JSON.stringify({ type: 'verify-user-info', username: user?.username, gender: user?.gender }))
+            // Si ya tenemos la llamada de video, cambiar de vista
+            if (pendingVerifyRemoteStream) {
+              useDhobbytvStore.getState().setVerificationAdminPeerId(conn.peer)
               useDhobbytvStore.getState().setView('verification-video')
             }
-          } catch {}
+          })
 
-          // Actualizar posicion
-          try {
-            const qRes = await fetch('/api/verify-queue')
-            const qData = await qRes.json()
-            const idx = (qData.queue || []).findIndex((item: any) => item.peerId === peerId)
-            setPosition(idx >= 0 ? idx + 1 : 0)
-          } catch {}
-        }, 3000)
+          conn.on('data', (raw: any) => {
+            if (!mounted) return
+            try {
+              const msg = typeof raw === 'string' ? JSON.parse(raw) : raw
+              if (msg.type === 'verify-accepted') {
+                toast.success('Has sido verificado!')
+                const currentUser = useDhobbytvStore.getState().user
+                if (currentUser) {
+                  useDhobbytvStore.getState().setUser({ ...currentUser, verified: true })
+                  fetch('/api/verify-user', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: currentUser.username }) })
+                }
+                setTimeout(() => { useDhobbytvStore.getState().setView('main') }, 1000)
+              } else if (msg.type === 'verify-rejected') {
+                toast.error('Verificacion rechazada.')
+                const currentUser = useDhobbytvStore.getState().user
+                if (currentUser) fetch('/api/delete-user', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: currentUser.username }) })
+                setTimeout(() => { useDhobbytvStore.getState().setUser(null); useDhobbytvStore.getState().setView('login') }, 1000)
+              }
+            } catch {}
+          })
+        })
+
+        // 6. ESCUCHAR llamada de video ENTRANTE del admin
+        // Cuando el admin hace peer.call(userPeerId, stream), esto se dispara AQUI
+        peer.on('call', (call) => {
+          console.log('[VERIFY-USER] Llamada de video entrante de:', call.peer)
+          if (!mounted || !globalStream) return
+
+          setStatus('connecting')
+          pendingVerifyCall = call
+
+          // Contestar con nuestro stream de camara
+          call.answer(globalStream)
+          console.log('[VERIFY-USER] Llamada contestada con stream local')
+
+          call.on('stream', (remoteStream: MediaStream) => {
+            console.log('[VERIFY-USER] Stream remoto recibido, tracks:', remoteStream.getTracks().length)
+            if (!mounted) return
+            pendingVerifyRemoteStream = remoteStream
+            // Si ya tenemos data channel abierto, cambiar de vista
+            if (pendingVerifyDataConn && pendingVerifyDataConn.open) {
+              useDhobbytvStore.getState().setVerificationAdminPeerId(call.peer)
+              useDhobbytvStore.getState().setView('verification-video')
+            }
+          })
+
+          call.on('close', () => {
+            console.log('[VERIFY-USER] Llamada cerrada por admin')
+            if (mounted) {
+              toast.error('El administrador se desconecto')
+              useDhobbytvStore.getState().setView('verification-pending')
+            }
+          })
+
+          call.on('error', (err: any) => {
+            console.error('[VERIFY-USER] Error en llamada:', err)
+          })
+        })
+
+        console.log('[VERIFY-USER] Listeners registrados, esperando admin...')
       })
     }
 
@@ -320,8 +377,11 @@ function VerificationView() {
 
     return () => {
       mounted = false
-      clearInterval(checkInterval)
       clearInterval(heartbeatInterval)
+      // Limpiar conexiones pendientes
+      pendingVerifyDataConn = null
+      pendingVerifyCall = null
+      pendingVerifyRemoteStream = null
       // Salir de la cola via API
       if (peerIdRef.current) {
         fetch('/api/verify-queue', {
@@ -330,8 +390,6 @@ function VerificationView() {
           body: JSON.stringify({ action: 'leave', peerId: peerIdRef.current }),
         }).catch(() => {})
       }
-      // NO matar globalStream aqui - VerificationVideoView lo necesita
-      // Solo se mata en handleExit (accion explicita del usuario)
     }
   }, [])
 
@@ -348,6 +406,9 @@ function VerificationView() {
     cleanupPeer(globalPeer)
     setGlobalPeer(null)
     setGlobalPeerId(null)
+    pendingVerifyDataConn = null
+    pendingVerifyCall = null
+    pendingVerifyRemoteStream = null
     useDhobbytvStore.getState().setView('verification-pending')
   }
 
@@ -394,14 +455,22 @@ function VerificationView() {
                 Conectando al servidor P2P...
               </div>
             )}
+            {status === 'connecting' && (
+              <div className="space-y-2">
+                <div className="flex items-center justify-center gap-2 text-yellow-400">
+                  <div className="w-3 h-3 border-2 border-yellow-400 border-t-transparent rounded-full animate-spin" />
+                  Administrador conectando...
+                </div>
+                <p className="text-gray-400 text-xs">Preparate para mostrar tu identificacion</p>
+              </div>
+            )}
             {status === 'waiting' && (
               <div className="space-y-2">
                 <div className="flex items-center justify-center gap-2 text-green-400">
                   <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse" />
                   En cola de verificacion
                 </div>
-                {position > 0 && <p className="text-gray-300">Posicion: <span className="text-purple-400 font-bold">#{position}</span></p>}
-                {position === 0 && <p className="text-purple-400 font-medium">Eres el siguiente!</p>}
+                <p className="text-gray-400 text-xs">Esperando administrador disponible...</p>
               </div>
             )}
             {status === 'error' && (
@@ -422,10 +491,9 @@ function VerificationView() {
   )
 }
 
-// ==================== VERIFICATION VIDEO (usuario - P2P con admin via PeerJS) ====================
+// ==================== VERIFICATION VIDEO (usuario - usa conexiones pendientes de VerificationView) ====================
 function VerificationVideoView() {
   const user = useDhobbytvStore((s) => s.user)
-  const verificationAdminPeerId = useDhobbytvStore((s) => s.verificationAdminPeerId)
   const verificationMessages = useDhobbytvStore((s) => s.verificationMessages)
   const addVerificationMessage = useDhobbytvStore((s) => s.addVerificationMessage)
 
@@ -434,42 +502,56 @@ function VerificationVideoView() {
 
   const localVideoRef = useRef<HTMLVideoElement>(null)
   const remoteVideoRef = useRef<HTMLVideoElement>(null)
-  const dataConnRef = useRef<any>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [verificationMessages])
 
   useEffect(() => {
     let mounted = true
+    console.log('[VERIFY-VIDEO] Montando, datos pendientes:', {
+      hasDataConn: !!pendingVerifyDataConn,
+      hasCall: !!pendingVerifyCall,
+      hasRemoteStream: !!pendingVerifyRemoteStream,
+      hasLocalStream: !!globalStream,
+    })
 
-    // Mostrar video local inmediatamente
+    // 1. Mostrar video local inmediatamente
     if (localVideoRef.current && globalStream) {
       localVideoRef.current.srcObject = globalStream
     }
 
-    if (!globalPeer || !verificationAdminPeerId) {
-      setStatusMsg('Error: no se encontro la conexion. Volviendo...')
-      setTimeout(() => { if (mounted) useDhobbytvStore.getState().setView('verification') }, 2000)
-      return () => { mounted = false }
+    // 2. Mostrar stream remoto si ya lo tenemos
+    if (remoteVideoRef.current && pendingVerifyRemoteStream) {
+      console.log('[VERIFY-VIDEO] Stream remoto ya disponible, asignando...')
+      remoteVideoRef.current.srcObject = pendingVerifyRemoteStream
+      const ph = document.getElementById('remote-video-placeholder')
+      if (ph) ph.style.opacity = '0'
+      setStatusMsg('Video conectado. Muestra tu identificacion por camara.')
     }
 
-    // 1. ESCUCHAR conexion de datos ENTRANTE del admin (no crear salida)
-    // Cuando admin hace peer.connect(userPeerId), esto se dispara en el usuario
-    const handleConnection = (conn: any) => {
-      if (!mounted) return
-      dataConnRef.current = conn
+    // 3. Configurar data connection si ya la tenemos
+    if (pendingVerifyDataConn) {
+      console.log('[VERIFY-VIDEO] Data connection ya disponible')
+      setStatusMsg('Conectado con admin. Muestra tu identificacion.')
+      addVerificationMessage('Sistema', 'Conectado con el administrador. Puedes escribir mensajes abajo.')
 
-      conn.on('open', () => {
-        if (!mounted) return
-        setStatusMsg('Conectado con admin. Muestra tu identificacion.')
-        conn.send(JSON.stringify({ type: 'verify-user-info', username: user?.username, gender: user?.gender }))
-        addVerificationMessage('Sistema', 'Conectado con el administrador. Puedes escribir mensajes abajo.')
-      })
+      // Si el data connection no estaba abierto, esperar
+      if (!pendingVerifyDataConn.open) {
+        pendingVerifyDataConn.on('open', () => {
+          if (!mounted) return
+          console.log('[VERIFY-VIDEO] Data connection abierta')
+          setStatusMsg('Conectado con admin. Muestra tu identificacion.')
+          addVerificationMessage('Sistema', 'Conectado con el administrador. Puedes escribir mensajes abajo.')
+          pendingVerifyDataConn?.send(JSON.stringify({ type: 'verify-user-info', username: user?.username, gender: user?.gender }))
+        })
+      }
 
-      conn.on('data', (raw: any) => {
+      // Escuchar mensajes entrantes
+      pendingVerifyDataConn.on('data', (raw: any) => {
         if (!mounted) return
         try {
           const msg = typeof raw === 'string' ? JSON.parse(raw) : raw
+          console.log('[VERIFY-VIDEO] Mensaje recibido:', msg.type)
           if (msg.type === 'chat') {
             addVerificationMessage('Admin', msg.text)
           } else if (msg.type === 'verify-accepted') {
@@ -492,13 +574,11 @@ function VerificationVideoView() {
       })
     }
 
-    globalPeer.on('connection', handleConnection)
-
-    // 2. ESCUCHAR llamada de video ENTRANTE del admin
-    const handleCall = (call: any) => {
-      if (!mounted || !globalStream) return
-      call.answer(globalStream)
-      call.on('stream', (remoteStream: MediaStream) => {
+    // 4. Si tenemos la llamada pero no el stream remoto aun, esperar
+    if (pendingVerifyCall && !pendingVerifyRemoteStream) {
+      console.log('[VERIFY-VIDEO] Esperando stream remoto de la llamada...')
+      pendingVerifyCall.on('stream', (remoteStream: MediaStream) => {
+        console.log('[VERIFY-VIDEO] Stream remoto recibido!')
         if (remoteVideoRef.current && mounted) {
           remoteVideoRef.current.srcObject = remoteStream
           const ph = document.getElementById('remote-video-placeholder')
@@ -506,31 +586,26 @@ function VerificationVideoView() {
           setStatusMsg('Video conectado. Muestra tu identificacion por camara.')
         }
       })
-      call.on('close', () => {
-        if (mounted) {
-          toast.error('El administrador se desconecto')
-          useDhobbytvStore.getState().setView('verification-pending')
-        }
-      })
     }
-
-    globalPeer.on('call', handleCall)
 
     return () => {
       mounted = false
-      if (dataConnRef.current) try { dataConnRef.current.close() } catch {}
     }
   }, [])
 
   const handleSendMessage = () => {
-    if (!chatInput.trim() || !dataConnRef.current) return
-    dataConnRef.current.send(JSON.stringify({ type: 'chat', text: chatInput }))
+    if (!chatInput.trim() || !pendingVerifyDataConn) return
+    pendingVerifyDataConn.send(JSON.stringify({ type: 'chat', text: chatInput }))
     addVerificationMessage(user?.username || 'Tu', chatInput)
     setChatInput('')
   }
 
   const handleExit = () => {
-    if (dataConnRef.current) try { dataConnRef.current.close() } catch {}
+    if (pendingVerifyDataConn) try { pendingVerifyDataConn.close() } catch {}
+    if (pendingVerifyCall) try { pendingVerifyCall.close() } catch {}
+    pendingVerifyDataConn = null
+    pendingVerifyCall = null
+    pendingVerifyRemoteStream = null
     stopStream(globalStream)
     setGlobalStream(null)
     cleanupPeer(globalPeer)
@@ -590,7 +665,7 @@ function VerificationVideoView() {
   )
 }
 
-// ==================== ADMIN VERIFICATION P2P (admin side) ====================
+// ==================== ADMIN VERIFICATION P2P (admin side - conecta DIRECTAMENTE al usuario) ====================
 function AdminVerificationView() {
   const user = useDhobbytvStore((s) => s.user)
   const verificationTarget = useDhobbytvStore((s) => s.verificationTarget)
@@ -611,17 +686,24 @@ function AdminVerificationView() {
   useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [verificationMessages])
 
   useEffect(() => {
-    if (!verificationTarget || !globalPeer) return
+    if (!verificationTarget || !globalPeer) {
+      console.error('[ADMIN-VERIFY] Sin target o sin peer:', { target: !!verificationTarget, peer: !!globalPeer })
+      return
+    }
     let mounted = true
 
+    console.log('[ADMIN-VERIFY] Iniciando conexion directa a:', verificationTarget.peerId)
+    console.log('[ADMIN-VERIFY] Mi peer:', globalPeer.id, 'destruido:', globalPeer.destroyed)
     setStatusMsg('Conectando con ' + verificationTarget.username + '...')
 
     // 1. Pedir camara EN PARALELO con la conexion de datos
     const streamPromise = (async () => {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+        console.log('[ADMIN-VERIFY] Camara obtenida, tracks:', stream.getTracks().length)
         return stream
-      } catch {
+      } catch (err) {
+        console.warn('[ADMIN-VERIFY] Sin camara, intentando solo audio:', err)
         try {
           return await navigator.mediaDevices.getUserMedia({ video: false, audio: true })
         } catch {
@@ -630,14 +712,16 @@ function AdminVerificationView() {
       }
     })()
 
-    // 2. Conectar data channel SALIENTE al usuario
+    // 2. Conectar data channel SALIENTE al usuario DIRECTAMENTE via PeerJS
+    console.log('[ADMIN-VERIFY] Creando data connection a:', verificationTarget.peerId)
     const dataConn = globalPeer.connect(verificationTarget.peerId, { reliable: true })
     dataConnRef.current = dataConn
 
     dataConn.on('open', async () => {
+      console.log('[ADMIN-VERIFY] Data channel ABIERTO con', verificationTarget.peerId)
       if (!mounted) return
       setStatusMsg('Data conectado. Llamando por video...')
-      addVerificationMessage('Sistema', 'Conexion establecida. Llamando por video...')
+      addVerificationMessage('Sistema', 'Conexion de datos establecida. Llamando por video...')
 
       // Data abierto + camara lista = llamar inmediatamente
       const callStream = await streamPromise
@@ -649,26 +733,52 @@ function AdminVerificationView() {
         setAdminCameraOn(true)
       }
 
+      // 3. HACER LA LLAMADA DE VIDEO DIRECTAMENTE
+      console.log('[ADMIN-VERIFY] Llamando a:', verificationTarget.peerId, 'con stream de', callStream.getTracks().length, 'tracks')
       setStatusMsg('Llamando a ' + verificationTarget.username + '...')
-      const call = globalPeer.call(verificationTarget.peerId, callStream)
-      mediaCallRef.current = call
+      try {
+        const call = globalPeer.call(verificationTarget.peerId, callStream)
+        mediaCallRef.current = call
+        console.log('[ADMIN-VERIFY] Llamada creada, esperando stream...')
 
-      call.on('stream', (remoteStream: MediaStream) => {
-        if (remoteVideoRef.current && mounted) {
-          remoteVideoRef.current.srcObject = remoteStream
-          setStatusMsg('Video conectado con ' + verificationTarget.username + '. Revisa su documento.')
-          addVerificationMessage('Sistema', 'Video conectado.')
-        }
-      })
+        call.on('stream', (remoteStream: MediaStream) => {
+          console.log('[ADMIN-VERIFY] Stream remoto recibido! Tracks:', remoteStream.getTracks().map(t => t.kind))
+          if (remoteVideoRef.current && mounted) {
+            remoteVideoRef.current.srcObject = remoteStream
+            const ph = document.getElementById('admin-remote-video-placeholder')
+            if (ph) ph.style.opacity = '0'
+            setStatusMsg('Video conectado con ' + verificationTarget.username + '. Revisa su documento.')
+            addVerificationMessage('Sistema', 'Video conectado con ' + verificationTarget.username + '.')
+          }
+        })
 
-      call.on('close', () => {
-        if (mounted) { toast.error('El usuario se desconecto'); handleBack() }
-      })
+        call.on('close', () => {
+          console.log('[ADMIN-VERIFY] Llamada cerrada')
+          if (mounted) { toast.error('El usuario se desconecto'); handleBack() }
+        })
 
-      call.on('error', (err: any) => {
-        console.error('Call error:', err)
-        if (mounted) setStatusMsg('Error en la llamada. El usuario puede no estar disponible.')
-      })
+        call.on('error', (err: any) => {
+          console.error('[ADMIN-VERIFY] Error en llamada:', err.type, err)
+          if (mounted) setStatusMsg('Error en la llamada: ' + (err.type || 'desconocido') + '. El usuario puede no estar disponible.')
+        })
+
+        // Timeout 15s
+        setTimeout(() => {
+          if (mounted && remoteVideoRef.current && !remoteVideoRef.current.srcObject) {
+            console.warn('[ADMIN-VERIFY] Timeout: no se recibio video en 15s')
+            setStatusMsg('El video tarda mas de lo normal. El usuario puede tener problemas de conexion.')
+            addVerificationMessage('Sistema', 'Video aun no conectado despues de 15s. Puedes escribir al usuario.')
+          }
+        }, 15000)
+      } catch (err) {
+        console.error('[ADMIN-VERIFY] Error al llamar:', err)
+        if (mounted) setStatusMsg('Error al iniciar la llamada. Verifica tu conexion.')
+      }
+    })
+
+    dataConn.on('error', (err: any) => {
+      console.error('[ADMIN-VERIFY] Data connection error:', err.type, err)
+      if (mounted) setStatusMsg('Error de conexion: ' + (err.type || 'desconocido') + '. El usuario puede no estar en linea.')
     })
 
     dataConn.on('data', (raw: any) => {
@@ -678,24 +788,26 @@ function AdminVerificationView() {
         if (msg.type === 'chat') {
           addVerificationMessage(verificationTarget.username, msg.text)
         } else if (msg.type === 'verify-user-info') {
+          console.log('[ADMIN-VERIFY] Info de usuario recibida:', msg.username)
           setStatusMsg('Conectado con ' + msg.username)
+          addVerificationMessage('Sistema', msg.username + ' conectado.')
         }
       } catch {
         addVerificationMessage(verificationTarget.username, String(raw))
       }
     })
 
-    // Timeout 12s
-    const timeout = setTimeout(() => {
-      if (mounted && !remoteVideoRef.current?.srcObject) {
-        setStatusMsg('El video tarda mas de lo normal. Puedes escribirle al usuario.')
-        addVerificationMessage('Sistema', 'Video aun no conectado. Intente escribir al usuario.')
+    // Timeout general 20s
+    const generalTimeout = setTimeout(() => {
+      if (mounted && !dataConnRef.current?.open) {
+        console.warn('[ADMIN-VERIFY] Timeout general: data connection no se abrio en 20s')
+        setStatusMsg('No se pudo conectar con el usuario. Puede que ya no este en linea o tenga problemas de red.')
       }
-    }, 12000)
+    }, 20000)
 
     return () => {
       mounted = false
-      clearTimeout(timeout)
+      clearTimeout(generalTimeout)
       try { dataConnRef.current?.close() } catch {}
       try { mediaCallRef.current?.close() } catch {}
     }
@@ -829,6 +941,12 @@ function AdminVerificationView() {
           </div>
           <div className="relative rounded-xl overflow-hidden bg-black flex-1 min-h-0">
             <video ref={remoteVideoRef} autoPlay playsInline className="w-full h-full object-cover" />
+            <div id="admin-remote-video-placeholder" className="absolute inset-0 flex items-center justify-center pointer-events-none transition-opacity duration-500">
+              <div className="text-center">
+                <div className="w-8 h-8 border-2 border-green-400 border-t-transparent rounded-full animate-spin mx-auto mb-2" />
+                <p className="text-gray-400 text-sm">Esperando video de {verificationTarget.username}...</p>
+              </div>
+            </div>
             <div className="absolute bottom-3 right-3 w-32 h-24 sm:w-40 sm:h-30 rounded-lg overflow-hidden border-2 border-blue-500 shadow-lg bg-gray-900">
               {adminCameraOn ? (
                 <video ref={localVideoRef} autoPlay playsInline muted style={{ transform: 'scaleX(-1)' }} className="w-full h-full object-cover" />
@@ -938,18 +1056,14 @@ function AdminView() {
 
   const handleJoinVerification = async (target: any) => {
     if (!globalPeer) {
-      toast.error('PeerJS no esta listo')
+      toast.error('PeerJS no esta listo. Espera un momento.')
       return
     }
 
-    // Signal al usuario via API que el admin se conecto
-    await fetch('/api/verify-queue', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'signal', targetPeerId: target.peerId, adminPeerId: globalPeer!.id }),
-    })
+    console.log('[ADMIN] Unirse a verificacion de:', target.username, 'peerId:', target.peerId)
+    console.log('[ADMIN] Mi peer ID:', globalPeer.id, 'estado:', globalPeer.destroyed ? 'DESTRUIDO' : 'activo')
 
-    // Cambiar inmediatamente - AdminVerificationView se encarga de esperar
+    // Conectar DIRECTAMENTE al usuario via PeerJS (sin API intermediaria)
     setVerificationTarget({ peerId: target.peerId, username: target.username, gender: target.gender })
     clearVerificationMessages()
     useDhobbytvStore.getState().setView('admin-verification')
@@ -1158,12 +1272,8 @@ function SuperAdminView() {
   }, [])
 
   const handleJoinVerification = async (target: any) => {
-    if (!globalPeer) { toast.error('P2P no listo'); return }
-    await fetch('/api/verify-queue', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'signal', targetPeerId: target.peerId, adminPeerId: globalPeer!.id }),
-    })
+    if (!globalPeer) { toast.error('P2P no listo. Espera un momento.'); return }
+    console.log('[SUPER-ADMIN] Unirse a verificacion de:', target.username, 'peerId:', target.peerId)
     setVerificationTarget({ peerId: target.peerId, username: target.username, gender: target.gender })
     clearVerificationMessages()
     useDhobbytvStore.getState().setView('admin-verification')

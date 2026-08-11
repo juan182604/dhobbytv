@@ -34,15 +34,30 @@ export function genPeerId(username: string): string {
   return `dh_${username}_${rand}`
 }
 
-// Crear instancia PeerJS
+// Crear instancia PeerJS con multiples STUN/TURN para mejor conectividad
 export function createPeer(peerId: string): Peer {
   return new Peer(peerId, {
-    debug: 0,
+    debug: 1, // 1 = errores y warnings para debug
     config: {
       iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
         { urls: 'stun:stun1.l.google.com:19302' },
+        { urls: 'stun:stun2.l.google.com:19302' },
+        { urls: 'stun:stun3.l.google.com:19302' },
+        { urls: 'stun:stun4.l.google.com:19302' },
+        { urls: 'stun:stun.stunprotocol.org:3478' },
+        {
+          urls: 'turn:global.relay.metered.ca:80',
+          username: 'e74a7c5c0e6b3b6e3a3c7e6d',
+          credential: 'dK6R8qM2pL5nH7jE',
+        },
+        {
+          urls: 'turn:global.relay.metered.ca:443',
+          username: 'e74a7c5c0e6b3b6e3a3c7e6d',
+          credential: 'dK6R8qM2pL5nH7jE',
+        },
       ],
+      iceCandidatePoolSize: 10,
     },
   })
 }
