@@ -1,7 +1,6 @@
 import { NextResponse } from 'next/server'
 import { getSupabaseClient } from '@/lib/db'
 import bcrypt from 'bcryptjs'
-import pg from 'pg'
 
 export async function GET() {
   try {
@@ -37,32 +36,45 @@ export async function GET() {
       if (insertError) return NextResponse.json({ success: false, error: `Insert error: ${insertError.message} (code: ${insertError.code})` }, { status: 500 })
     }
 
-    // Auto-crear tabla verify_queue si no existe
-    const databaseUrl = process.env.DATABASE_URL
+    // Auto-crear tabla verify_queue via Supabase pg/query endpoint
     let tableCreated = false
-    if (databaseUrl && (databaseUrl.startsWith('postgresql://') || databaseUrl.startsWith('postgres://'))) {
+    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+    const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+    if (supabaseUrl && serviceKey) {
       try {
-        const client = new pg.Client({ connectionString: databaseUrl })
-        await client.connect()
-        await client.query(`
-          CREATE TABLE IF NOT EXISTS verify_queue (
-            "peerId" TEXT PRIMARY KEY,
-            username TEXT NOT NULL,
-            gender TEXT DEFAULT 'unknown',
-            "joinedAt" BIGINT DEFAULT 0,
-            "adminPeerId" TEXT
-          )
-        `)
-        await client.query(`CREATE INDEX IF NOT EXISTS idx_verify_queue_joinedAt ON verify_queue ("joinedAt")`)
-        await client.end()
-        tableCreated = true
+        const urlMatch = supabaseUrl.match(/https:\/\/([^.]+)\.supabase\.co/)
+        if (urlMatch) {
+          const ref = urlMatch[1]
+          const pgUrl = `https://${ref}.supabase.co/pg/query`
+          const response = await fetch(pgUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${serviceKey}`,
+              'apikey': serviceKey,
+            },
+            body: JSON.stringify({
+              query: `
+                CREATE TABLE IF NOT EXISTS verify_queue (
+                  "peerId" TEXT PRIMARY KEY,
+                  username TEXT NOT NULL,
+                  gender TEXT DEFAULT 'unknown',
+                  "joinedAt" BIGINT DEFAULT 0,
+                  "adminPeerId" TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_verify_queue_joinedAt ON verify_queue ("joinedAt");
+              `
+            }),
+          })
+          tableCreated = response.ok
+        }
       } catch {}
     }
 
     return NextResponse.json({
       success: true,
       message: existing ? 'Super admin actualizado' : 'Super admin creado',
-      verifyQueueTable: tableCreated ? 'creada' : 'no se pudo crear (verifica DATABASE_URL en Vercel)',
+      verifyQueueTable: tableCreated ? 'creada exitosamente' : 'no se pudo crear automaticamente',
     })
   } catch (e) {
     return NextResponse.json({ error: String(e) }, { status: 500 })
