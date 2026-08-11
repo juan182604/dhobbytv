@@ -832,6 +832,13 @@ function AdminView() {
   const [suspendDialog, setSuspendDialog] = useState<{ userId: string; username: string } | null>(null)
   const [suspendHours, setSuspendHours] = useState('24')
   const [selectedReportedUser, setSelectedReportedUser] = useState<any>(null)
+  const [refreshing, setRefreshing] = useState(false)
+
+  const handleRefresh = async () => {
+    setRefreshing(true)
+    await loadAdminData()
+    setTimeout(() => setRefreshing(false), 500)
+  }
 
   const handleBan = async () => {
     if (!banDialog) return
@@ -858,6 +865,9 @@ function AdminView() {
         <div className="flex items-center justify-between max-w-7xl mx-auto">
           <h1 className="text-xl font-black"><span className="text-purple-400">dhobby</span><span className="text-green-400">tv</span><span className="text-blue-400 text-sm ml-2">ADMIN</span></h1>
           <div className="flex items-center gap-3">
+            <Button variant="ghost" size="sm" className="text-gray-400" onClick={handleRefresh} disabled={refreshing}>
+              <svg className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
+            </Button>
             <Badge variant="outline" className={gunReady ? 'text-green-400 border-green-400' : 'text-red-400 border-red-400'}>{gunReady ? 'P2P Activo' : 'P2P Inactivo'}</Badge>
             <Badge variant="outline" className="text-green-400 border-green-400 text-xs">{onlineCount} online</Badge>
             <Button variant="ghost" size="sm" className="text-gray-400" onClick={() => { cleanupPeer(globalPeer); setGlobalPeer(null); if (globalPeerId && globalGun) goOffline(globalGun, globalPeerId); useDhobbytvStore.getState().reset(); useDhobbytvStore.getState().setView('login') }}>Salir</Button>
@@ -1045,6 +1055,13 @@ function SuperAdminView() {
   const [suspendDialog, setSuspendDialog] = useState<{ userId: string; username: string } | null>(null)
   const [suspendHours, setSuspendHours] = useState('24')
   const [selectedReportedUser, setSelectedReportedUser] = useState<any>(null)
+  const [refreshing, setRefreshing] = useState(false)
+
+  const handleRefresh = async () => {
+    setRefreshing(true)
+    await Promise.all([loadAdminData(), loadAds()])
+    setTimeout(() => setRefreshing(false), 500)
+  }
 
   const handleBan = async () => { if (!banDialog) return; await fetch('/api/admin-action', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'ban', userId: banDialog.userId, reason: banReason }) }); toast.success(`${banDialog.username} baneado`); setBanDialog(null); setBanReason(''); loadAdminData() }
   const handleUnban = async (userId: string) => { await fetch('/api/admin-action', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'unban', userId }) }); toast.success('Desbaneado'); loadAdminData() }
@@ -1057,6 +1074,9 @@ function SuperAdminView() {
         <div className="flex items-center justify-between max-w-7xl mx-auto">
           <h1 className="text-xl font-black"><span className="text-purple-400">dhobby</span><span className="text-green-400">tv</span><span className="text-red-400 text-sm ml-2">SUPER ADMIN</span></h1>
           <div className="flex items-center gap-3">
+            <Button variant="ghost" size="sm" className="text-gray-400" onClick={handleRefresh} disabled={refreshing}>
+              <svg className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
+            </Button>
             <Badge variant="outline" className={gunReady ? 'text-green-400 border-green-400' : 'text-red-400 border-red-400'}>{gunReady ? 'P2P Activo' : 'P2P Inactivo'}</Badge>
             <Badge variant="outline" className="text-green-400 border-green-400 text-xs">{onlineCount} online</Badge>
             <Button variant="ghost" size="sm" className="text-gray-400" onClick={() => { cleanupPeer(globalPeer); setGlobalPeer(null); if (globalPeerId && globalGun) goOffline(globalGun, globalPeerId); useDhobbytvStore.getState().reset(); useDhobbytvStore.getState().setView('login') }}>Salir</Button>
@@ -1474,8 +1494,11 @@ export default function DhobbytvApp() {
   const view = useDhobbytvStore((s) => s.view)
   const setCountry = useDhobbytvStore((s) => s.setCountry)
   const setAnnouncement = useDhobbytvStore((s) => s.setAnnouncement)
+  const [hydrated, setHydrated] = useState(false)
 
+  // Esperar a que Zustand hydrate desde localStorage
   useEffect(() => {
+    setHydrated(true)
     fetch('/api/geoip').then((r) => r.json()).then((data) => setCountry(data.country, data.countryCode)).catch(() => setCountry('Desconocido', 'XX'))
     fetch('/api/announcements').then((r) => r.json()).then((data) => { if (data.announcement) setAnnouncement(data.announcement.text) }).catch(() => {})
   }, [])
@@ -1493,6 +1516,8 @@ export default function DhobbytvApp() {
     main: <MainView />,
     chat: <MainView />,
   }
+
+  if (!hydrated) return <div className="min-h-screen bg-gray-950 flex items-center justify-center"><div className="w-8 h-8 border-4 border-purple-500 border-t-transparent rounded-full animate-spin" /></div>
 
   return (<>{views[view] || <LoginView />}<Toaster position="top-center" richColors /></>)
 }

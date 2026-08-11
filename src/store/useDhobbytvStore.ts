@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { persist } from 'zustand/middleware'
 
 export type AppView = 'login' | 'register' | 'verification-pending' | 'verification' | 'verification-video' | 'admin' | 'admin-verification' | 'super-admin' | 'main' | 'chat'
 
@@ -84,7 +85,9 @@ const initialState = {
   announcement: null as string | null,
 }
 
-export const useDhobbytvStore = create<DhobbytvState>((set) => ({
+export const useDhobbytvStore = create<DhobbytvState>()(
+  persist(
+    (set) => ({
   ...initialState,
   setView: (view) => set({ view }),
   setUser: (user) => set({ user }),
@@ -114,4 +117,15 @@ export const useDhobbytvStore = create<DhobbytvState>((set) => ({
   clearVerificationMessages: () => set({ verificationMessages: [] }),
   setAnnouncement: (text) => set({ announcement: text }),
   reset: () => set(initialState),
-}))
+}),
+    {
+      name: 'dhobbytv-session',
+      partialize: (state) => ({
+        user: state.user,
+        view: state.view,
+        country: state.country,
+        countryCode: state.countryCode,
+      }),
+    }
+  )
+)

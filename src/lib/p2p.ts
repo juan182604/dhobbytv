@@ -6,6 +6,10 @@ import Peer, { DataConnection, MediaConnection } from 'peerjs'
 
 // Gun relay URL - el usuario despliega un relay gratuito en Render
 export const GUN_RELAY = process.env.NEXT_PUBLIC_GUN_RELAY || ''
+// Public fallback relays (para cuando el propio este dormido)
+const PUBLIC_RELAYS = [
+  'https://gun-manhattan.herokuapp.com/gun',
+]
 
 // ==================== GUN.JS ====================
 let gunInstance: any = null
@@ -13,7 +17,9 @@ let gunInstance: any = null
 export async function getGun(): Promise<any> {
   if (gunInstance) return gunInstance
   const Gun = (await import('gun/gun')).default
-  const peers = GUN_RELAY ? [GUN_RELAY] : []
+  const peers: string[] = []
+  if (GUN_RELAY) peers.push(GUN_RELAY)
+  peers.push(...PUBLIC_RELAYS)
   gunInstance = Gun({
     peers,
     localStorage: false,
