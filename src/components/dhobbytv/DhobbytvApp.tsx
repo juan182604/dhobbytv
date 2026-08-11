@@ -214,18 +214,17 @@ function VerificationView() {
   const user = useDhobbytvStore((s) => s.user)
   const [status, setStatus] = useState<'init' | 'waiting' | 'error'>('init')
   const [position, setPosition] = useState(0)
+  const peerIdRef = useRef<string>('')
 
   useEffect(() => {
     let mounted = true
+    let checkInterval: ReturnType<typeof setInterval>
+    let heartbeatInterval: ReturnType<typeof setInterval>
 
     const setup = async () => {
-      // 1. Inicializar Gun.js
-      const gun = await getGun()
-      if (!mounted) return
-      setGlobalGun(gun)
-
-      // 2. Crear PeerJS
+      // 1. Crear PeerJS (sin Gun.js)
       const peerId = genPeerId(user!.username)
+      peerIdRef.current = peerId
       setGlobalPeerId(peerId)
       const peer = createPeer(peerId)
       setGlobalPeer(peer)
@@ -238,60 +237,64 @@ function VerificationView() {
       peer.on('open', async () => {
         if (!mounted) return
 
-        // 3. Obtener camara
+        // 2. Obtener camara
         try {
           const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
           if (!mounted) { stopStream(stream); return }
           setGlobalStream(stream)
-          setStatus('waiting')
         } catch {
           if (mounted) { toast.error('No se pudo acceder a la camara'); setStatus('error') }
           return
         }
 
-        // 4. Agregarse a la cola de verificacion en Gun.js
-        joinVerifyQueue(gun, peerId, { username: user!.username, gender: user!.gender })
-
-        // 5. Escuchar posicion en la cola
-        const queueItems = new Map<string, any>()
-        const posInterval = setInterval(() => {
-          if (!mounted) return
-          let pos = 0
-          const now = Date.now()
-          queueItems.forEach((data) => {
-            if (data && data.timestamp && now - data.timestamp < 300000 && data.peerId !== peerId) pos++
+        // 3. Agregarse a la cola via API
+        try {
+          await fetch('/api/verify-queue', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'join', peerId, username: user!.username, gender: user!.gender }),
           })
-          // Ordenar por timestamp
-          const sorted = [...queueItems.values()]
-            .filter((d) => d && d.timestamp && now - d.timestamp < 300000 && d.peerId !== peerId)
-            .sort((a, b) => a.timestamp - b.timestamp)
-          pos = sorted.findIndex((d) => d.peerId === peerId) + 1
-          if (pos <= 0) pos = queueItems.size
-          setPosition(pos)
-        }, 3000)
+        } catch {}
 
-        gun.get('dhobbytv/verify-queue').map().on((data: any, key: string) => {
-          if (!data || !data.peerId) { queueItems.delete(key); return }
-          queueItems.set(key, data)
-        })
+        if (!mounted) return
+        setStatus('waiting')
 
-        // 6. Escuchar seal de que el admin se conecto
-        watchVerificationSignal(gun, peerId, (adminPeerId) => {
+        // 4. Heartbeat cada 30s para mantenerse en la cola
+        heartbeatInterval = setInterval(() => {
+          fetch('/api/verify-queue', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'heartbeat', peerId }),
+          }).catch(() => {})
+        }, 30000)
+
+        // 5. Poll cada 3s para ver si un admin se conecto
+        checkInterval = setInterval(async () => {
           if (!mounted) return
-          // Admin se conecto - guardar su peerId y pasar a video
-          useDhobbytvStore.getState().setVerificationAdminPeerId(adminPeerId)
-          clearVerificationSignal(gun, peerId)
-          leaveVerifyQueue(gun, peerId)
-          useDhobbytvStore.getState().setView('verification-video')
-        })
+          try {
+            const res = await fetch('/api/verify-queue', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ action: 'check', peerId }),
+            })
+            const data = await res.json()
+            if (data.adminPeerId && mounted) {
+              // Admin se conecto - pasar a video
+              useDhobbytvStore.getState().setVerificationAdminPeerId(data.adminPeerId)
+              clearInterval(checkInterval)
+              clearInterval(heartbeatInterval)
+              useDhobbytvStore.getState().setView('verification-video')
+            }
+          } catch {}
 
-        // Cleanup
-        const origCleanup = () => {
-          clearInterval(posInterval)
-          leaveVerifyQueue(gun, peerId)
-          clearVerificationSignal(gun, peerId)
-        }
-        return origCleanup
+          // Actualizar posicion
+          try {
+            const qRes = await fetch('/api/verify-queue')
+            const qData = await qRes.json()
+            const idx = (qData.queue || []).findIndex((item: any) => item.peerId === peerId)
+            setPosition(idx >= 0 ? idx + 1 : 0)
+          } catch {}
+        }, 3000)
       })
     }
 
@@ -299,22 +302,33 @@ function VerificationView() {
 
     return () => {
       mounted = false
+      clearInterval(checkInterval)
+      clearInterval(heartbeatInterval)
+      // Salir de la cola via API
+      if (peerIdRef.current) {
+        fetch('/api/verify-queue', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'leave', peerId: peerIdRef.current }),
+        }).catch(() => {})
+      }
       stopStream(globalStream)
       setGlobalStream(null)
-      if (globalPeerId && globalGun) leaveVerifyQueue(globalGun, globalPeerId)
-      if (globalPeerId && globalGun) clearVerificationSignal(globalGun, globalPeerId)
     }
   }, [])
 
   const handleExit = () => {
+    if (peerIdRef.current) {
+      fetch('/api/verify-queue', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'leave', peerId: peerIdRef.current }),
+      }).catch(() => {})
+    }
     stopStream(globalStream)
     setGlobalStream(null)
     cleanupPeer(globalPeer)
     setGlobalPeer(null)
-    if (globalPeerId && globalGun) {
-      leaveVerifyQueue(globalGun, globalPeerId)
-      clearVerificationSignal(globalGun, globalPeerId)
-    }
     setGlobalPeerId(null)
     useDhobbytvStore.getState().setView('verification-pending')
   }
@@ -723,39 +737,37 @@ function AdminVerificationView() {
 // ==================== ADMIN VIEW ====================
 function AdminView() {
   const user = useDhobbytvStore((s) => s.user)
-  const verificationQueue = useDhobbytvStore((s) => s.verificationQueue)
-  const setVerificationQueue = useDhobbytvStore((s) => s.setVerificationQueue)
   const setVerificationTarget = useDhobbytvStore((s) => s.setVerificationTarget)
   const clearVerificationMessages = useDhobbytvStore((s) => s.clearVerificationMessages)
 
   const [pendingUsers, setPendingUsers] = useState<any[]>([])
   const [reportedUsers, setReportedUsers] = useState<any[]>([])
+  const [videoQueue, setVideoQueue] = useState<any[]>([])
   const [onlineCount, setOnlineCount] = useState(0)
-  const [gunReady, setGunReady] = useState(false)
+  const [peerReady, setPeerReady] = useState(false)
 
   const loadAdminData = async () => {
     try {
-      const [pendingRes, reportedRes] = await Promise.all([
+      const [pendingRes, reportedRes, queueRes] = await Promise.all([
         fetch('/api/pending-users').then((r) => r.json()),
         fetch('/api/reported-users').then((r) => r.json()).catch(() => ({ users: [] })),
+        fetch('/api/verify-queue').then((r) => r.json()),
       ])
       if (pendingRes.users) setPendingUsers(pendingRes.users)
       if (reportedRes.users) setReportedUsers(reportedRes.users)
+      if (queueRes.queue) setVideoQueue(queueRes.queue)
     } catch {}
   }
 
-  // Gun.js + PeerJS setup para admin
+  // PeerJS setup para admin (sin Gun.js para cola)
   useEffect(() => {
     let mounted = true
-    let unsubQueue: (() => void) | null = null
-    let unsubOnline: (() => void) | null = null
 
     const setup = async () => {
       const gun = await getGun()
       if (!mounted) return
       setGlobalGun(gun)
 
-      // Crear PeerJS para el admin
       const peerId = genPeerId(user!.username + '_admin')
       setGlobalPeerId(peerId)
       const peer = createPeer(peerId)
@@ -763,43 +775,27 @@ function AdminView() {
 
       peer.on('open', () => {
         if (!mounted) return
-        setGunReady(true)
-        // Registrarse como online
-        goOnline(gun, peerId, {
-          username: user!.username,
-          gender: user!.gender,
-          country: '',
-          countryCode: '',
-          verified: true,
-          isAdmin: true,
-        })
+        setPeerReady(true)
+        goOnline(gun, peerId, { username: user!.username, gender: user!.gender, country: '', countryCode: '', verified: true, isAdmin: true })
       })
 
-      peer.on('error', () => { if (mounted) setGunReady(false) })
+      peer.on('error', () => { if (mounted) setPeerReady(false) })
 
-      // Escuchar cola de verificacion
-      unsubQueue = watchVerifyQueue(gun, (queue) => {
-        if (mounted) setVerificationQueue(queue)
-      })
-
-      // Escuchar conteo online
-      unsubOnline = watchOnlineCount(gun, (count) => {
-        if (mounted) setOnlineCount(count)
-      })
+      // Escuchar conteo online (Gun.js)
+      const unsub = watchOnlineCount(gun, (count) => { if (mounted) setOnlineCount(count) })
+      return unsub
     }
 
-    setup()
+    let unsubOnline: (() => void) | null = null
+    setup().then((unsub) => { if (unsub) unsubOnline = unsub })
     loadAdminData()
-    const refreshInterval = setInterval(loadAdminData, 10000)
+    const refreshInterval = setInterval(loadAdminData, 5000) // cada 5s para cola rapida
 
     return () => {
       mounted = false
       clearInterval(refreshInterval)
-      if (unsubQueue) unsubQueue()
       if (unsubOnline) unsubOnline()
-      if (globalPeerId && globalGun) {
-        goOffline(globalGun, globalPeerId)
-      }
+      if (globalPeerId && globalGun) goOffline(globalGun, globalPeerId)
       cleanupPeer(globalPeer)
       setGlobalPeer(null)
       setGlobalPeerId(null)
@@ -807,21 +803,21 @@ function AdminView() {
   }, [])
 
   const handleJoinVerification = async (target: any) => {
-    if (!globalPeer || !globalGun) {
+    if (!globalPeer) {
       toast.error('PeerJS no esta listo')
       return
     }
 
-    // Remover de la cola en Gun
-    leaveVerifyQueue(globalGun, target.peerId)
+    // Signal al usuario via API que el admin se conecto
+    await fetch('/api/verify-queue', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'signal', targetPeerId: target.peerId, adminPeerId: globalPeer!.id }),
+    })
 
-    // Signal al usuario que el admin se conecto
-    signalVerificationStart(globalGun, target.peerId, globalPeer!.id)
+    // Esperar un momento para que el usuario reciba la signal
+    await new Promise((r) => setTimeout(r, 1500))
 
-    // Esperar un momento para que el usuario reciba la seal
-    await new Promise((r) => setTimeout(r, 1000))
-
-    // Configurar target y pasar a la vista de verificacion
     setVerificationTarget({ peerId: target.peerId, username: target.username, gender: target.gender })
     clearVerificationMessages()
     useDhobbytvStore.getState().setView('admin-verification')
@@ -868,7 +864,7 @@ function AdminView() {
             <Button variant="ghost" size="sm" className="text-gray-400" onClick={handleRefresh} disabled={refreshing}>
               <svg className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
             </Button>
-            <Badge variant="outline" className={gunReady ? 'text-green-400 border-green-400' : 'text-red-400 border-red-400'}>{gunReady ? 'P2P Activo' : 'P2P Inactivo'}</Badge>
+            <Badge variant="outline" className={peerReady ? 'text-green-400 border-green-400' : 'text-red-400 border-red-400'}>{peerReady ? 'P2P Activo' : 'P2P Inactivo'}</Badge>
             <Badge variant="outline" className="text-green-400 border-green-400 text-xs">{onlineCount} online</Badge>
             <Button variant="ghost" size="sm" className="text-gray-400" onClick={() => { cleanupPeer(globalPeer); setGlobalPeer(null); if (globalPeerId && globalGun) goOffline(globalGun, globalPeerId); useDhobbytvStore.getState().reset(); useDhobbytvStore.getState().setView('login') }}>Salir</Button>
           </div>
@@ -878,13 +874,13 @@ function AdminView() {
         <Tabs defaultValue="pending">
           <TabsList className="bg-gray-900 mb-4">
             <TabsTrigger value="pending" className="data-[state=active]:bg-purple-600">Pendientes ({pendingUsers.length})</TabsTrigger>
-            <TabsTrigger value="video-queue" className="data-[state=active]:bg-purple-600">Video Queue ({verificationQueue.length})</TabsTrigger>
+            <TabsTrigger value="video-queue" className="data-[state=active]:bg-purple-600">Video Queue ({videoQueue.length})</TabsTrigger>
             <TabsTrigger value="reported" className="data-[state=active]:bg-purple-600">Reportados ({reportedUsers.length})</TabsTrigger>
           </TabsList>
 
           <TabsContent value="pending">
             <Card className="bg-gray-900 border-gray-800">
-              <CardHeader><CardTitle className="text-lg">Pendientes - Verificacion Directa</CardTitle><CardDescription className="text-gray-400">Se actualiza cada 10s. Verifica sin video.</CardDescription></CardHeader>
+              <CardHeader><CardTitle className="text-lg">Pendientes - Verificacion Directa</CardTitle><CardDescription className="text-gray-400">Se actualiza cada 5s. Verifica sin video.</CardDescription></CardHeader>
               <CardContent><ScrollArea className="max-h-[600px]"><div className="space-y-2">
                 {pendingUsers.map((u: any) => { const mA = Math.floor((Date.now() - new Date(u.createdAt).getTime()) / 60000); const isNew = mA < 10; return (
                   <div key={u.id} className={`flex items-center justify-between p-3 rounded-lg border ${isNew ? 'bg-yellow-900/20 border-yellow-800' : 'bg-gray-800 border-gray-700'}`}>
@@ -899,15 +895,15 @@ function AdminView() {
 
           <TabsContent value="video-queue">
             <Card className="bg-gray-900 border-gray-800">
-              <CardHeader><CardTitle className="text-lg">Cola de Verificacion por Video ({verificationQueue.length})</CardTitle><CardDescription className="text-gray-400">Usuarios esperando verificacion por video P2P via Gun.js + PeerJS</CardDescription></CardHeader>
+              <CardHeader><CardTitle className="text-lg">Cola de Verificacion por Video ({videoQueue.length})</CardTitle><CardDescription className="text-gray-400">Usuarios esperando verificacion por video P2P via PeerJS</CardDescription></CardHeader>
               <CardContent>
-                {!gunReady ? (
+                {!peerReady ? (
                   <div className="text-center py-8 space-y-3"><div className="text-4xl">📡</div><p className="text-gray-400 text-sm">Conectando al P2P...</p></div>
-                ) : verificationQueue.length === 0 ? (
+                ) : videoQueue.length === 0 ? (
                   <p className="text-gray-500 text-center py-8">Nadie esperando verificacion por video</p>
                 ) : (
                   <ScrollArea className="max-h-96"><div className="space-y-2">
-                    {verificationQueue.map((item, i) => { const wM = Math.floor((Date.now() - item.timestamp) / 60000); const wS = Math.floor(((Date.now() - item.timestamp) % 60000) / 1000); return (
+                    {videoQueue.map((item: any, i: number) => { const wM = Math.floor((Date.now() - item.timestamp) / 60000); const wS = Math.floor(((Date.now() - item.timestamp) % 60000) / 1000); return (
                       <div key={item.peerId} className="flex items-center justify-between p-3 bg-gray-800 rounded-lg">
                         <div className="flex items-center gap-3"><span className="text-gray-500 text-sm w-6">#{i + 1}</span><span>{getGenderShort(item.gender)}</span><div><p className="font-medium text-sm">{item.username}</p><p className="text-xs text-gray-500">{wM}m {wS}s</p></div></div>
                         <Button size="sm" className="bg-purple-600 hover:bg-purple-700" onClick={() => handleJoinVerification(item)}>Unirme (P2P)</Button>
@@ -944,16 +940,15 @@ function AdminView() {
 // ==================== SUPER ADMIN VIEW ====================
 function SuperAdminView() {
   const user = useDhobbytvStore((s) => s.user)
-  const verificationQueue = useDhobbytvStore((s) => s.verificationQueue)
-  const setVerificationQueue = useDhobbytvStore((s) => s.setVerificationQueue)
   const setVerificationTarget = useDhobbytvStore((s) => s.setVerificationTarget)
   const clearVerificationMessages = useDhobbytvStore((s) => s.clearVerificationMessages)
 
   const [pendingUsers, setPendingUsers] = useState<any[]>([])
   const [reportedUsers, setReportedUsers] = useState<any[]>([])
+  const [videoQueue, setVideoQueue] = useState<any[]>([])
   const [stats, setStats] = useState<any>(null)
   const [onlineCount, setOnlineCount] = useState(0)
-  const [gunReady, setGunReady] = useState(false)
+  const [peerReady, setPeerReady] = useState(false)
   const [announcement, setAnnouncement] = useState('')
 
   const [ads, setAds] = useState<any[]>([])
@@ -962,14 +957,16 @@ function SuperAdminView() {
 
   const loadAdminData = async () => {
     try {
-      const [pendingRes, reportedRes, statsRes] = await Promise.all([
+      const [pendingRes, reportedRes, statsRes, queueRes] = await Promise.all([
         fetch('/api/pending-users').then((r) => r.json()),
         fetch('/api/reported-users').then((r) => r.json()).catch(() => ({ users: [] })),
         fetch('/api/stats').then((r) => r.json()).catch(() => ({})),
+        fetch('/api/verify-queue').then((r) => r.json()),
       ])
       if (pendingRes.users) setPendingUsers(pendingRes.users)
       if (reportedRes.users) setReportedUsers(reportedRes.users)
       if (statsRes) setStats(statsRes)
+      if (queueRes.queue) setVideoQueue(queueRes.queue)
     } catch {}
   }
 
@@ -981,10 +978,9 @@ function SuperAdminView() {
     } catch {}
   }
 
-  // Gun.js + PeerJS setup para super admin
+  // PeerJS setup para super admin (cola via API)
   useEffect(() => {
     let mounted = true
-    let unsubQueue: (() => void) | null = null
     let unsubOnline: (() => void) | null = null
 
     const setup = async () => {
@@ -999,25 +995,23 @@ function SuperAdminView() {
 
       peer.on('open', () => {
         if (!mounted) return
-        setGunReady(true)
+        setPeerReady(true)
         goOnline(gun, peerId, { username: user!.username, gender: user!.gender, country: '', countryCode: '', verified: true, isAdmin: true })
       })
 
-      peer.on('error', () => { if (mounted) setGunReady(false) })
+      peer.on('error', () => { if (mounted) setPeerReady(false) })
 
-      unsubQueue = watchVerifyQueue(gun, (queue) => { if (mounted) setVerificationQueue(queue) })
       unsubOnline = watchOnlineCount(gun, (count) => { if (mounted) setOnlineCount(count) })
     }
 
     setup()
     loadAdminData()
     loadAds()
-    const refreshInterval = setInterval(() => { loadAdminData(); loadAds() }, 10000)
+    const refreshInterval = setInterval(() => { loadAdminData(); loadAds() }, 5000)
 
     return () => {
       mounted = false
       clearInterval(refreshInterval)
-      if (unsubQueue) unsubQueue()
       if (unsubOnline) unsubOnline()
       if (globalPeerId && globalGun) goOffline(globalGun, globalPeerId)
       cleanupPeer(globalPeer)
@@ -1027,10 +1021,13 @@ function SuperAdminView() {
   }, [])
 
   const handleJoinVerification = async (target: any) => {
-    if (!globalPeer || !globalGun) { toast.error('P2P no listo'); return }
-    leaveVerifyQueue(globalGun, target.peerId)
-    signalVerificationStart(globalGun, target.peerId, globalPeer!.id)
-    await new Promise((r) => setTimeout(r, 1000))
+    if (!globalPeer) { toast.error('P2P no listo'); return }
+    await fetch('/api/verify-queue', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'signal', targetPeerId: target.peerId, adminPeerId: globalPeer!.id }),
+    })
+    await new Promise((r) => setTimeout(r, 1500))
     setVerificationTarget({ peerId: target.peerId, username: target.username, gender: target.gender })
     clearVerificationMessages()
     useDhobbytvStore.getState().setView('admin-verification')
@@ -1077,7 +1074,7 @@ function SuperAdminView() {
             <Button variant="ghost" size="sm" className="text-gray-400" onClick={handleRefresh} disabled={refreshing}>
               <svg className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
             </Button>
-            <Badge variant="outline" className={gunReady ? 'text-green-400 border-green-400' : 'text-red-400 border-red-400'}>{gunReady ? 'P2P Activo' : 'P2P Inactivo'}</Badge>
+            <Badge variant="outline" className={peerReady ? 'text-green-400 border-green-400' : 'text-red-400 border-red-400'}>{peerReady ? 'P2P Activo' : 'P2P Inactivo'}</Badge>
             <Badge variant="outline" className="text-green-400 border-green-400 text-xs">{onlineCount} online</Badge>
             <Button variant="ghost" size="sm" className="text-gray-400" onClick={() => { cleanupPeer(globalPeer); setGlobalPeer(null); if (globalPeerId && globalGun) goOffline(globalGun, globalPeerId); useDhobbytvStore.getState().reset(); useDhobbytvStore.getState().setView('login') }}>Salir</Button>
           </div>
@@ -1088,7 +1085,7 @@ function SuperAdminView() {
 
         <Tabs defaultValue="video-queue">
           <TabsList className="bg-gray-900 mb-4">
-            <TabsTrigger value="video-queue" className="data-[state=active]:bg-purple-600">Video Queue ({verificationQueue.length})</TabsTrigger>
+            <TabsTrigger value="video-queue" className="data-[state=active]:bg-purple-600">Video Queue ({videoQueue.length})</TabsTrigger>
             <TabsTrigger value="pending" className="data-[state=active]:bg-purple-600">Pendientes ({pendingUsers.length})</TabsTrigger>
             <TabsTrigger value="reported" className="data-[state=active]:bg-purple-600">Reportados ({reportedUsers.length})</TabsTrigger>
             <TabsTrigger value="announcements" className="data-[state=active]:bg-purple-600">Anuncios</TabsTrigger>
@@ -1097,11 +1094,11 @@ function SuperAdminView() {
 
           <TabsContent value="video-queue">
             <Card className="bg-gray-900 border-gray-800">
-              <CardHeader><CardTitle className="text-lg">Cola de Verificacion por Video ({verificationQueue.length})</CardTitle><CardDescription className={gunReady ? 'text-gray-400' : 'text-red-400'}>{gunReady ? 'Gun.js + PeerJS activo' : 'Esperando conexion P2P...'}</CardDescription></CardHeader>
+              <CardHeader><CardTitle className="text-lg">Cola de Verificacion por Video ({videoQueue.length})</CardTitle><CardDescription className="text-gray-400">Usuarios esperando verificacion por video P2P via PeerJS</CardDescription></CardHeader>
               <CardContent>
-                {!gunReady ? (<div className="text-center py-8 space-y-3"><div className="text-4xl">📡</div><p className="text-gray-400 text-sm">Conectando...</p></div>) : verificationQueue.length === 0 ? (<p className="text-gray-500 text-center py-8">Nadie esperando verificacion por video</p>) : (
+                {!peerReady ? (<div className="text-center py-8 space-y-3"><div className="text-4xl">📡</div><p className="text-gray-400 text-sm">Conectando...</p></div>) : videoQueue.length === 0 ? (<p className="text-gray-500 text-center py-8">Nadie esperando verificacion por video</p>) : (
                   <ScrollArea className="max-h-64"><div className="space-y-2">
-                    {verificationQueue.map((item, i) => { const wM = Math.floor((Date.now() - item.timestamp) / 60000); const wS = Math.floor(((Date.now() - item.timestamp) % 60000) / 1000); return (
+                    {videoQueue.map((item: any, i: number) => { const wM = Math.floor((Date.now() - item.timestamp) / 60000); const wS = Math.floor(((Date.now() - item.timestamp) % 60000) / 1000); return (
                       <div key={item.peerId} className="flex items-center justify-between p-3 bg-gray-800 rounded-lg">
                         <div className="flex items-center gap-3"><span className="text-gray-500 text-sm w-6">#{i + 1}</span><span>{getGenderShort(item.gender)}</span><div><p className="font-medium text-sm">{item.username}</p><p className="text-xs text-gray-500">{wM}m {wS}s</p></div></div>
                         <Button size="sm" className="bg-purple-600 hover:bg-purple-700" onClick={() => handleJoinVerification(item)}>Unirme (P2P)</Button>
