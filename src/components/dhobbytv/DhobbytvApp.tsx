@@ -3,6 +3,12 @@
 import { useEffect, useRef, useCallback, useState } from 'react'
 import Peer from 'peerjs'
 import { useDhobbytvStore, AppView } from '@/store/useDhobbytvStore'
+
+// Helper: concatenar classNames sin template literals (Turbopack bug workaround)
+function cn(...classes: (string | false | undefined | null)[]): string {
+  return classes.filter(Boolean).join(' ')
+}
+
 import { COUNTRIES, HOBBIES, getCountryFlag, getCountryName, getGenderLabel, getGenderShort } from '@/lib/countries'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -69,7 +75,7 @@ function LoginView() {
       const data = await res.json()
       if (data.error) {
         toast.error(data.error)
-        if (data.suspendedUntil) toast.info(`Hasta: ${new Date(data.suspendedUntil).toLocaleString()}`)
+        if (data.suspendedUntil) toast.info('Hasta: ' + new Date(data.suspendedUntil).toLocaleString())
         return
       }
       setUser(data.user)
@@ -160,7 +166,7 @@ function RegisterView() {
             <p className="text-gray-300 text-sm mb-2">Genero:</p>
             <div className="grid grid-cols-3 gap-2">
               {['Hombre', 'Mujer', 'Trans'].map((g) => (
-                <button key={g} onClick={() => setGender(g)} className={`py-3 px-4 rounded-lg border text-sm font-medium transition-all ${gender === g ? 'bg-purple-600 border-purple-500 text-white' : 'bg-gray-800 border-gray-600 text-gray-300 hover:border-gray-400'}`}>
+                <button key={g} onClick={() => setGender(g)} className={cn('py-3 px-4 rounded-lg border text-sm font-medium transition-all', gender === g ? 'bg-purple-600 border-purple-500 text-white' : 'bg-gray-800 border-gray-600 text-gray-300 hover:border-gray-400')}>
                   {getGenderLabel(g)}
                 </button>
               ))}
@@ -191,7 +197,7 @@ function VerificationPendingView() {
     if (!user?.username) return
     const poll = setInterval(async () => {
       try {
-        const res = await fetch(`/api/check-verified?username=${encodeURIComponent(user.username)}`)
+        const res = await fetch('/api/check-verified?username=' + encodeURIComponent(user.username))
         const data = await res.json()
         if (data.verified && user) {
           setUser({ ...user, verified: true })
@@ -289,11 +295,14 @@ function VerificationView() {
         try {
           const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
           if (!mounted) { stopStream(stream); return }
+          console.log('[VERIFY] Stream lista, tracks:', stream.getTracks().map((t: any) => t.kind + '(enabled=' + t.enabled + ')'))
+          if (stream.getAudioTracks().length === 0) {
+            toast.warning('No se detecto microfono. El admin no podra escucharte.')
+          }
           setGlobalStream(stream)
           if (localVideoRef.current) { localVideoRef.current.srcObject = stream }
           setCameraReady(true)
           setMicReady(stream.getAudioTracks().length > 0)
-          console.log('[VERIFY] Stream lista, tracks:', stream.getTracks().map(t => t.kind))
         } catch (err) {
           console.error('[VERIFY] Error camara/mic:', err)
           if (mounted) { toast.error('No se pudo acceder a la camara o microfono'); setPhase('error') }
@@ -366,7 +375,7 @@ function VerificationView() {
           setPhase('connected')
           setStatusMsg('Estableciendo video...')
           call.answer(globalStream)
-          console.log('[VERIFY] Llamada contestada')
+          console.log('[VERIFY] Llamada contestada, enviando tracks:', globalStream.getTracks().map((t: any) => t.kind + '(enabled=' + t.enabled + ')'))
 
           call.on('stream', (remoteStream: MediaStream) => {
             console.log('[VERIFY] Stream remoto! Tracks:', remoteStream.getTracks().map((t: any) => t.kind))
@@ -458,7 +467,7 @@ function VerificationView() {
             <div className="bg-green-600/90 text-white text-xs px-2 py-1 rounded-full flex items-center gap-1">
               <div className="w-1.5 h-1.5 bg-white rounded-full animate-pulse" />{cameraReady ? 'CAMARA ON' : 'SIN CAMARA'}
             </div>
-            <div className={`${micReady ? 'bg-green-600/90' : 'bg-red-600/90'} text-white text-xs px-2 py-1 rounded-full flex items-center gap-1">
+            <div className={cn(micReady ? 'bg-green-600/90' : 'bg-red-600/90', 'text-white text-xs px-2 py-1 rounded-full flex items-center gap-1')}>
               <div className="w-1.5 h-1.5 bg-white rounded-full" />{micReady ? 'MIC ON' : 'MIC OFF'}
             </div>
           </div>
@@ -470,7 +479,7 @@ function VerificationView() {
             <div className="bg-gray-900 rounded-lg h-28 overflow-y-auto p-2 space-y-1 shrink-0">
               {verificationMessages.length === 0 && <p className="text-gray-600 text-xs text-center">Escribe un mensaje abajo</p>}
               {verificationMessages.map((msg, i) => (
-                <p key={i} className={`text-sm ${msg.from === 'Sistema' ? 'text-purple-400 italic' : msg.from === 'Admin' ? 'text-blue-400' : 'text-green-400'}`}>
+                <p key={i} className={cn('text-sm', msg.from === 'Sistema' ? 'text-purple-400 italic' : msg.from === 'Admin' ? 'text-blue-400' : 'text-green-400')}>
                   <span className="font-medium">{msg.from}:</span> {msg.text}
                 </p>
               ))}
@@ -496,6 +505,7 @@ function AdminVerificationView() {
 
   const [adminCameraOn, setAdminCameraOn] = useState(false)
   const [adminMicOn, setAdminMicOn] = useState(false)
+  const [userAudioReady, setUserAudioReady] = useState(false)
   const [chatInput, setChatInput] = useState('')
   const [statusMsg, setStatusMsg] = useState('Conectando con usuario...')
 
@@ -566,9 +576,17 @@ function AdminVerificationView() {
         console.log('[ADMIN-VERIFY] Llamada creada, esperando stream...')
 
         call.on('stream', (remoteStream: MediaStream) => {
-          console.log('[ADMIN-VERIFY] Stream remoto recibido! Tracks:', remoteStream.getTracks().map(t => t.kind))
+          console.log('[ADMIN-VERIFY] Stream remoto recibido! Tracks:', remoteStream.getTracks().map((t: any) => t.kind + '(enabled=' + t.enabled + ')'))
+          // Enable audio tracks from user
+          remoteStream.getAudioTracks().forEach(t => { t.enabled = true })
+          const audioCount = remoteStream.getAudioTracks().length
+          setUserAudioReady(audioCount > 0)
+          if (audioCount === 0) {
+            addVerificationMessage('Sistema', 'El usuario no tiene track de audio')
+          }
           if (remoteVideoRef.current && mounted) {
             remoteVideoRef.current.srcObject = remoteStream
+            remoteVideoRef.current.play().catch((e: any) => console.warn('[ADMIN-VERIFY] Autoplay blocked:', e))
             const ph = document.getElementById('admin-remote-video-placeholder')
             if (ph) ph.style.opacity = '0'
             setStatusMsg('Video conectado con ' + verificationTarget.username + '. Revisa su documento.')
@@ -775,6 +793,7 @@ function AdminVerificationView() {
               <Button size="sm" variant="outline" className={adminMicOn ? 'text-green-400 border-green-400' : 'text-gray-400'} onClick={toggleAdminMic}>
                 {adminMicOn ? 'Mic ON' : 'Mic OFF'}
               </Button>
+              <Badge className={userAudioReady ? 'bg-green-700 text-xs' : 'bg-red-700 text-xs'}>{userAudioReady ? 'AUDIO' : 'SIN AUDIO'}</Badge>
               <Button size="sm" variant="outline" className={adminCameraOn ? 'text-red-400 border-red-400' : 'text-gray-400'} onClick={toggleAdminCamera}>
                 {adminCameraOn ? 'Apagar mi camara' : 'Prender mi camara'}
               </Button>
@@ -802,7 +821,7 @@ function AdminVerificationView() {
           <p className="text-center text-gray-300 text-sm">{statusMsg}</p>
           <div className="bg-gray-900 rounded-lg h-32 overflow-y-auto p-3 space-y-1">
             {verificationMessages.map((msg, i) => (
-              <p key={i} className={`text-sm ${msg.from === 'Sistema' ? 'text-purple-400 italic' : msg.from === user?.username ? 'text-blue-400' : 'text-green-400'}`}>
+              <p key={i} className={cn('text-sm', msg.from === 'Sistema' ? 'text-purple-400 italic' : msg.from === user?.username ? 'text-blue-400' : 'text-green-400')}>
                 <span className="font-medium">{msg.from}:</span> {msg.text}
               </p>
             ))}
@@ -929,7 +948,7 @@ function AdminView() {
   const handleBan = async () => {
     if (!banDialog) return
     await fetch('/api/admin-action', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'ban', userId: banDialog.userId, reason: banReason }) })
-    toast.success(`${banDialog.username} baneado`); setBanDialog(null); setBanReason(''); loadAdminData()
+    toast.success(banDialog.username + ' baneado'); setBanDialog(null); setBanReason(''); loadAdminData()
   }
   const handleUnban = async (userId: string) => {
     await fetch('/api/admin-action', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'unban', userId }) })
@@ -938,7 +957,7 @@ function AdminView() {
   const handleSuspend = async () => {
     if (!suspendDialog) return
     await fetch('/api/admin-action', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'suspend', userId: suspendDialog.userId, hours: Number(suspendHours) }) })
-    toast.success(`${suspendDialog.username} suspendido`); setSuspendDialog(null); loadAdminData()
+    toast.success(suspendDialog.username + ' suspendido'); setSuspendDialog(null); loadAdminData()
   }
   const handleUnsuspend = async (userId: string) => {
     await fetch('/api/admin-action', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'unsuspend', userId }) })
@@ -952,7 +971,7 @@ function AdminView() {
           <h1 className="text-xl font-black"><span className="text-purple-400">dhobby</span><span className="text-green-400">tv</span><span className="text-blue-400 text-sm ml-2">ADMIN</span></h1>
           <div className="flex items-center gap-3">
             <Button variant="ghost" size="sm" className="text-gray-400" onClick={handleRefresh} disabled={refreshing}>
-              <svg className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
+              <svg className={cn('w-4 h-4', refreshing ? 'animate-spin' : '')} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
             </Button>
             <Badge variant="outline" className={peerReady ? 'text-green-400 border-green-400' : 'text-red-400 border-red-400'}>{peerReady ? 'P2P Activo' : 'P2P Inactivo'}</Badge>
             <Badge variant="outline" className="text-green-400 border-green-400 text-xs">{onlineCount} online</Badge>
@@ -974,9 +993,9 @@ function AdminView() {
               <CardHeader><CardTitle className="text-lg">Pendientes - Verificacion Directa</CardTitle><CardDescription className="text-gray-400">Se actualiza cada 5s. Verifica sin video.</CardDescription></CardHeader>
               <CardContent><ScrollArea className="max-h-[600px]"><div className="space-y-2">
                 {pendingUsers.map((u: any) => { const mA = Math.floor((Date.now() - new Date(u.createdAt).getTime()) / 60000); const isNew = mA < 10; return (
-                  <div key={u.id} className={`flex items-center justify-between p-3 rounded-lg border ${isNew ? 'bg-yellow-900/20 border-yellow-800' : 'bg-gray-800 border-gray-700'}`}>
-                    <div className="flex items-center gap-3"><span className="text-lg">{getGenderShort(u.gender)}</span><div><div className="flex items-center gap-2"><p className="font-medium text-sm">{u.username}</p>{isNew && <Badge className="bg-yellow-600 text-xs animate-pulse">NUEVO</Badge>}</div><p className="text-xs text-gray-500">{new Date(u.createdAt).toLocaleString()} ({mA < 60 ? `${mA}m` : `${Math.floor(mA / 60)}h`})</p></div></div>
-                    <div className="flex gap-2"><Button size="sm" className="bg-green-600 hover:bg-green-700 text-xs" onClick={async () => { await fetch('/api/pending-users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'verify', userId: u.id }) }); toast.success(`${u.username} verificado`); loadAdminData() }}>Verificar</Button><Button size="sm" className="bg-red-600 hover:bg-red-700 text-xs" onClick={async () => { await fetch('/api/pending-users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'reject', userId: u.id }) }); toast.error(`${u.username} eliminado`); loadAdminData() }}>Rechazar</Button></div>
+                  <div key={u.id} className={cn('flex items-center justify-between p-3 rounded-lg border', isNew ? 'bg-yellow-900/20 border-yellow-800' : 'bg-gray-800 border-gray-700')}>
+                    <div className="flex items-center gap-3"><span className="text-lg">{getGenderShort(u.gender)}</span><div><div className="flex items-center gap-2"><p className="font-medium text-sm">{u.username}</p>{isNew && <Badge className="bg-yellow-600 text-xs animate-pulse">NUEVO</Badge>}</div><p className="text-xs text-gray-500">{new Date(u.createdAt).toLocaleString()} ({mA < 60 ? (mA + 'm') : (Math.floor(mA / 60) + 'h')})</p></div></div>
+                    <div className="flex gap-2"><Button size="sm" className="bg-green-600 hover:bg-green-700 text-xs" onClick={async () => { { const res = await fetch('/api/pending-users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'verify', userId: u.id }) }); const d = await res.json(); if (d.error) toast.error('Error: ' + d.error); else toast.success(u.username + ' verificado'); loadAdminData() } }}>Verificar</Button><Button size="sm" className="bg-red-600 hover:bg-red-700 text-xs" onClick={async () => { { const res = await fetch('/api/pending-users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'reject', userId: u.id }) }); const d = await res.json(); if (d.error) toast.error('Error: ' + d.error); else toast.error(u.username + ' eliminado'); loadAdminData() } }}>Rechazar</Button></div>
                   </div>
                 )})}
                 {pendingUsers.length === 0 && <p className="text-gray-500 text-center py-4">No hay pendientes</p>}
@@ -990,7 +1009,7 @@ function AdminView() {
               <CardContent><ScrollArea className="max-h-[600px]"><div className="space-y-2">
                 {verifiedUsers.map((u: any) => { const mA = Math.floor((Date.now() - new Date(u.createdAt).getTime()) / 60000); return (
                   <div key={u.id} className="flex items-center justify-between p-3 rounded-lg border bg-gray-800 border-gray-700">
-                    <div className="flex items-center gap-3"><span className="text-lg">{getGenderShort(u.gender)}</span><div><div className="flex items-center gap-2"><p className="font-medium text-sm">{u.username}</p><Badge className="bg-green-700 text-xs">VERIFICADO</Badge></div><p className="text-xs text-gray-500">{new Date(u.createdAt).toLocaleString()} ({mA < 60 ? `${mA}m` : `${Math.floor(mA / 60)}h`})</p></div></div>
+                    <div className="flex items-center gap-3"><span className="text-lg">{getGenderShort(u.gender)}</span><div><div className="flex items-center gap-2"><p className="font-medium text-sm">{u.username}</p><Badge className="bg-green-700 text-xs">VERIFICADO</Badge></div><p className="text-xs text-gray-500">{new Date(u.createdAt).toLocaleString()} ({mA < 60 ? (mA + 'm') : (Math.floor(mA / 60) + 'h')})</p></div></div>
                     <Button size="sm" className="bg-red-600 hover:bg-red-700 text-xs" onClick={() => setBanDialog({ userId: u.id, username: u.username })}>Banear</Button>
                   </div>
                 )})}
@@ -1026,7 +1045,7 @@ function AdminView() {
               <CardHeader><CardTitle className="text-lg">Reportados ({reportedUsers.length})</CardTitle></CardHeader>
               <CardContent><ScrollArea className="max-h-96"><div className="space-y-2">
                 {reportedUsers.sort((a: any, b: any) => b._count?.reports - a._count?.reports).map((u: any) => (
-                  <div key={u.id} className={`p-3 rounded-lg border ${u.banned ? 'bg-red-900/20 border-red-800' : 'bg-gray-800 border-gray-700'}`}>
+                  <div key={u.id} className={cn('p-3 rounded-lg border', u.banned ? 'bg-red-900/20 border-red-800' : 'bg-gray-800 border-gray-700')}>
                     <div className="flex items-center justify-between flex-wrap gap-2"><div className="flex items-center gap-3"><span>{getGenderShort(u.gender)}</span><span className="font-medium text-sm">{u.username}</span><Badge className={u._count?.reports >= 3 ? 'bg-red-600 text-white' : 'bg-orange-600 text-white'}>{u._count?.reports} reporte{u._count?.reports !== 1 ? 's' : ''}</Badge>{u.banned && <Badge className="bg-red-800">BANEADO</Badge>}{u.suspendedUntil && new Date(u.suspendedUntil) > new Date() && <Badge className="bg-orange-600">SUSPENDIDO</Badge>}</div><div className="flex gap-2 flex-wrap">{!u.banned && <><Button size="sm" className="bg-red-600 text-xs" onClick={() => setBanDialog({ userId: u.id, username: u.username })}>Banear</Button><Button size="sm" className="bg-orange-600 text-xs" onClick={() => setSuspendDialog({ userId: u.id, username: u.username })}>Suspender</Button></>}{(u.banned || (u.suspendedUntil && new Date(u.suspendedUntil) > new Date())) && <Button size="sm" className="bg-green-600 text-xs" onClick={() => { if (u.banned) handleUnban(u.id); else handleUnsuspend(u.id) }}>{u.banned ? 'Desbanear' : 'Quitar susp.'}</Button>}<Button size="sm" variant="outline" className="text-xs" onClick={() => setSelectedReportedUser(selectedReportedUser?.id === u.id ? null : u)}>Ver</Button></div></div>
                     {selectedReportedUser?.id === u.id && u.reports?.length > 0 && <div className="mt-2 p-2 bg-gray-900 rounded-lg space-y-1">{u.reports.map((r: any) => (<div key={r.id} className="text-xs text-gray-300 flex gap-2"><span className="text-gray-500">{new Date(r.createdAt).toLocaleString()}</span><span>-</span><span>Por: {r.reporter?.username || 'N/A'}</span><span>-</span><span className="text-yellow-400">{r.reason}</span></div>))}</div>}
                   </div>
@@ -1050,6 +1069,7 @@ function SuperAdminView() {
   const clearVerificationMessages = useDhobbytvStore((s) => s.clearVerificationMessages)
 
   const [pendingUsers, setPendingUsers] = useState<any[]>(cachedAdminData?.pendingUsers || [])
+  const [verifiedUsers, setVerifiedUsers] = useState<any[]>([])
   const [reportedUsers, setReportedUsers] = useState<any[]>(cachedAdminData?.reportedUsers || [])
   const [videoQueue, setVideoQueue] = useState<any[]>(cachedAdminData?.videoQueue || [])
   const [stats, setStats] = useState<any>(cachedAdminData?.stats || { totalUsers: 0, verifiedUsers: 0, pendingUsers: 0, bannedUsers: 0, totalReports: 0 })
@@ -1063,16 +1083,18 @@ function SuperAdminView() {
 
   const loadAdminData = async () => {
     try {
-      const [pendingRes, reportedRes, statsRes, queueRes] = await Promise.all([
+      const [pendingRes, reportedRes, statsRes, queueRes, verifiedRes] = await Promise.all([
         fetch('/api/pending-users').then((r) => r.json()),
         fetch('/api/reported-users').then((r) => r.json()).catch(() => ({ users: [] })),
         fetch('/api/admin-stats').then((r) => r.json()).catch(() => ({})),
         fetch('/api/verify-queue').then((r) => r.json()),
+        fetch('/api/verified-users').then((r) => r.json()).catch(() => ({ users: [] })),
       ])
       if (pendingRes.users) { setPendingUsers(pendingRes.users); cachedAdminData = { ...cachedAdminData, pendingUsers: pendingRes.users } }
       if (reportedRes.users) { setReportedUsers(reportedRes.users); cachedAdminData = { ...cachedAdminData, reportedUsers: reportedRes.users } }
       if (statsRes && statsRes.totalUsers !== undefined) { setStats(statsRes); cachedAdminData = { ...cachedAdminData, stats: statsRes } }
       if (queueRes.queue) { setVideoQueue(queueRes.queue); cachedAdminData = { ...cachedAdminData, videoQueue: queueRes.queue } }
+      if (verifiedRes.users) { setVerifiedUsers(verifiedRes.users) }
     } catch {}
   }
 
@@ -1166,9 +1188,9 @@ function SuperAdminView() {
     setTimeout(() => setRefreshing(false), 500)
   }
 
-  const handleBan = async () => { if (!banDialog) return; await fetch('/api/admin-action', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'ban', userId: banDialog.userId, reason: banReason }) }); toast.success(`${banDialog.username} baneado`); setBanDialog(null); setBanReason(''); loadAdminData() }
+  const handleBan = async () => { if (!banDialog) return; await fetch('/api/admin-action', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'ban', userId: banDialog.userId, reason: banReason }) }); toast.success(banDialog.username + ' baneado'); setBanDialog(null); setBanReason(''); loadAdminData() }
   const handleUnban = async (userId: string) => { await fetch('/api/admin-action', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'unban', userId }) }); toast.success('Desbaneado'); loadAdminData() }
-  const handleSuspend = async () => { if (!suspendDialog) return; await fetch('/api/admin-action', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'suspend', userId: suspendDialog.userId, hours: Number(suspendHours) }) }); toast.success(`${suspendDialog.username} suspendido`); setSuspendDialog(null); loadAdminData() }
+  const handleSuspend = async () => { if (!suspendDialog) return; await fetch('/api/admin-action', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'suspend', userId: suspendDialog.userId, hours: Number(suspendHours) }) }); toast.success(suspendDialog.username + ' suspendido'); setSuspendDialog(null); loadAdminData() }
   const handleUnsuspend = async (userId: string) => { await fetch('/api/admin-action', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'unsuspend', userId }) }); toast.success('Suspension quitada'); loadAdminData() }
 
   return (
@@ -1178,7 +1200,7 @@ function SuperAdminView() {
           <h1 className="text-xl font-black"><span className="text-purple-400">dhobby</span><span className="text-green-400">tv</span><span className="text-red-400 text-sm ml-2">SUPER ADMIN</span></h1>
           <div className="flex items-center gap-3">
             <Button variant="ghost" size="sm" className="text-gray-400" onClick={handleRefresh} disabled={refreshing}>
-              <svg className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
+              <svg className={cn('w-4 h-4', refreshing ? 'animate-spin' : '')} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
             </Button>
             <Badge variant="outline" className={peerReady ? 'text-green-400 border-green-400' : 'text-red-400 border-red-400'}>{peerReady ? 'P2P Activo' : 'P2P Inactivo'}</Badge>
             <Badge variant="outline" className="text-green-400 border-green-400 text-xs">{onlineCount} online</Badge>
@@ -1187,12 +1209,13 @@ function SuperAdminView() {
         </div>
       </header>
       <main className="max-w-7xl mx-auto p-6">
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-6">{[{ label: 'Total', value: stats.totalUsers, color: 'text-purple-400' },{ label: 'Verificados', value: stats.verifiedUsers, color: 'text-green-400' },{ label: 'Pendientes', value: stats.pendingUsers, color: 'text-yellow-400' },{ label: 'Baneados', value: stats.bannedUsers, color: 'text-red-400' },{ label: 'Reportes', value: stats.totalReports, color: 'text-orange-400' }].map((s) => (<Card key={s.label} className="bg-gray-900 border-gray-800"><CardContent className="p-3 text-center"><p className={`text-2xl font-bold ${s.color}`}>{s.value}</p><p className="text-xs text-gray-500">{s.label}</p></CardContent></Card>))}</div>
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-6">{[{ label: 'Total', value: stats.totalUsers, color: 'text-purple-400' },{ label: 'Verificados', value: stats.verifiedUsers, color: 'text-green-400' },{ label: 'Pendientes', value: stats.pendingUsers, color: 'text-yellow-400' },{ label: 'Baneados', value: stats.bannedUsers, color: 'text-red-400' },{ label: 'Reportes', value: stats.totalReports, color: 'text-orange-400' }].map((s) => (<Card key={s.label} className="bg-gray-900 border-gray-800"><CardContent className="p-3 text-center"><p className={cn('text-2xl font-bold', s.color)}>{s.value}</p><p className="text-xs text-gray-500">{s.label}</p></CardContent></Card>))}</div>
 
         <Tabs defaultValue="video-queue">
           <TabsList className="bg-gray-900 mb-4">
             <TabsTrigger value="video-queue" className="data-[state=active]:bg-purple-600">Video Queue ({videoQueue.length})</TabsTrigger>
             <TabsTrigger value="pending" className="data-[state=active]:bg-purple-600">Pendientes ({pendingUsers.length})</TabsTrigger>
+            <TabsTrigger value="verified" className="data-[state=active]:bg-green-600">Verificados ({verifiedUsers.length})</TabsTrigger>
             <TabsTrigger value="reported" className="data-[state=active]:bg-purple-600">Reportados ({reportedUsers.length})</TabsTrigger>
             <TabsTrigger value="announcements" className="data-[state=active]:bg-purple-600">Anuncios</TabsTrigger>
             <TabsTrigger value="ads-mgmt" className="data-[state=active]:bg-purple-600">Publicidad</TabsTrigger>
@@ -1221,12 +1244,27 @@ function SuperAdminView() {
               <CardHeader><CardTitle className="text-lg">Pendientes - Verificacion Directa ({pendingUsers.length})</CardTitle><CardDescription className="text-gray-400">Se actualiza cada 10s. Verifica sin video.</CardDescription></CardHeader>
               <CardContent><ScrollArea className="max-h-64"><div className="space-y-2">
                 {pendingUsers.map((u: any) => { const mA = Math.floor((Date.now() - new Date(u.createdAt).getTime()) / 60000); const isNew = mA < 10; return (
-                  <div key={u.id} className={`flex items-center justify-between p-3 rounded-lg border ${isNew ? 'bg-yellow-900/20 border-yellow-800' : 'bg-gray-800 border-gray-700'}`}>
-                    <div className="flex items-center gap-3"><span>{getGenderShort(u.gender)}</span><div><div className="flex items-center gap-2"><p className="font-medium text-sm">{u.username}</p>{isNew && <Badge className="bg-yellow-600 text-xs animate-pulse">NUEVO</Badge>}</div><p className="text-xs text-gray-500">{new Date(u.createdAt).toLocaleString()} ({mA < 60 ? `${mA}m` : `${Math.floor(mA / 60)}h`})</p></div></div>
-                    <div className="flex gap-2"><Button size="sm" className="bg-green-600 hover:bg-green-700 text-xs" onClick={async () => { await fetch('/api/pending-users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'verify', userId: u.id }) }); toast.success(`${u.username} verificado`); loadAdminData() }}>Verificar</Button><Button size="sm" className="bg-red-600 hover:bg-red-700 text-xs" onClick={async () => { await fetch('/api/pending-users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'reject', userId: u.id }) }); toast.error(`${u.username} eliminado`); loadAdminData() }}>Rechazar</Button></div>
+                  <div key={u.id} className={cn('flex items-center justify-between p-3 rounded-lg border', isNew ? 'bg-yellow-900/20 border-yellow-800' : 'bg-gray-800 border-gray-700')}>
+                    <div className="flex items-center gap-3"><span>{getGenderShort(u.gender)}</span><div><div className="flex items-center gap-2"><p className="font-medium text-sm">{u.username}</p>{isNew && <Badge className="bg-yellow-600 text-xs animate-pulse">NUEVO</Badge>}</div><p className="text-xs text-gray-500">{new Date(u.createdAt).toLocaleString()} ({mA < 60 ? (mA + 'm') : (Math.floor(mA / 60) + 'h')})</p></div></div>
+                    <div className="flex gap-2"><Button size="sm" className="bg-green-600 hover:bg-green-700 text-xs" onClick={async () => { { const res = await fetch('/api/pending-users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'verify', userId: u.id }) }); const d = await res.json(); if (d.error) toast.error('Error: ' + d.error); else toast.success(u.username + ' verificado'); loadAdminData() } }}>Verificar</Button><Button size="sm" className="bg-red-600 hover:bg-red-700 text-xs" onClick={async () => { { const res = await fetch('/api/pending-users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'reject', userId: u.id }) }); const d = await res.json(); if (d.error) toast.error('Error: ' + d.error); else toast.error(u.username + ' eliminado'); loadAdminData() } }}>Rechazar</Button></div>
                   </div>
                 )})}
                 {pendingUsers.length === 0 && <p className="text-gray-500 text-center py-4">No hay pendientes</p>}
+              </div></ScrollArea></CardContent>
+            </Card>
+          </TabsContent>
+
+          <TabsContent value="verified">
+            <Card className="bg-gray-900 border-gray-800">
+              <CardHeader><CardTitle className="text-lg">Usuarios Verificados ({verifiedUsers.length})</CardTitle><CardDescription className="text-gray-400">Usuarios que han pasado la verificacion</CardDescription></CardHeader>
+              <CardContent><ScrollArea className="max-h-96"><div className="space-y-2">
+                {verifiedUsers.map((u: any) => { const mA = Math.floor((Date.now() - new Date(u.createdAt).getTime()) / 60000); return (
+                  <div key={u.id} className="flex items-center justify-between p-3 rounded-lg border bg-gray-800 border-gray-700">
+                    <div className="flex items-center gap-3"><span>{getGenderShort(u.gender)}</span><div><div className="flex items-center gap-2"><p className="font-medium text-sm">{u.username}</p><Badge className="bg-green-700 text-xs">VERIFICADO</Badge></div><p className="text-xs text-gray-500">{new Date(u.createdAt).toLocaleString()} ({mA < 60 ? (mA + 'm') : (Math.floor(mA / 60) + 'h')})</p></div></div>
+                    <Button size="sm" className="bg-red-600 hover:bg-red-700 text-xs" onClick={() => setBanDialog({ userId: u.id, username: u.username })}>Banear</Button>
+                  </div>
+                )})}
+                {verifiedUsers.length === 0 && <p className="text-gray-500 text-center py-4">No hay verificados</p>}
               </div></ScrollArea></CardContent>
             </Card>
           </TabsContent>
@@ -1236,7 +1274,7 @@ function SuperAdminView() {
               <CardHeader><CardTitle className="text-lg">Reportados ({reportedUsers.length})</CardTitle></CardHeader>
               <CardContent><ScrollArea className="max-h-96"><div className="space-y-2">
                 {reportedUsers.sort((a: any, b: any) => (b._count?.reports || 0) - (a._count?.reports || 0)).map((u: any) => (
-                  <div key={u.id} className={`p-3 rounded-lg border ${u.banned ? 'bg-red-900/20 border-red-800' : 'bg-gray-800 border-gray-700'}`}>
+                  <div key={u.id} className={cn('p-3 rounded-lg border', u.banned ? 'bg-red-900/20 border-red-800' : 'bg-gray-800 border-gray-700')}>
                     <div className="flex items-center justify-between flex-wrap gap-2"><div className="flex items-center gap-3"><span>{getGenderShort(u.gender)}</span><span className="font-medium text-sm">{u.username}</span><Badge className={(u._count?.reports || 0) >= 3 ? 'bg-red-600 text-white' : 'bg-orange-600 text-white'}>{u._count?.reports || 0} reporte{(u._count?.reports || 0) !== 1 ? 's' : ''}</Badge>{u.banned && <Badge className="bg-red-800">BANEADO</Badge>}{u.suspendedUntil && new Date(u.suspendedUntil) > new Date() && <Badge className="bg-orange-600">SUSPENDIDO</Badge>}</div><div className="flex gap-2 flex-wrap">{!u.banned && <><Button size="sm" className="bg-red-600 text-xs" onClick={() => setBanDialog({ userId: u.id, username: u.username })}>Banear</Button><Button size="sm" className="bg-orange-600 text-xs" onClick={() => setSuspendDialog({ userId: u.id, username: u.username })}>Suspender</Button></>}{(u.banned || (u.suspendedUntil && new Date(u.suspendedUntil) > new Date())) && <Button size="sm" className="bg-green-600 text-xs" onClick={() => { if (u.banned) handleUnban(u.id); else handleUnsuspend(u.id) }}>{u.banned ? 'Desbanear' : 'Quitar susp.'}</Button>}<Button size="sm" variant="outline" className="text-xs" onClick={() => setSelectedReportedUser(selectedReportedUser?.id === u.id ? null : u)}>Ver</Button></div></div>
                     {selectedReportedUser?.id === u.id && u.reports?.length > 0 && <div className="mt-2 p-2 bg-gray-900 rounded-lg space-y-1">{u.reports.map((r: any) => (<div key={r.id} className="text-xs text-gray-300 flex gap-2"><span className="text-gray-500">{new Date(r.createdAt).toLocaleString()}</span><span>-</span><span>Por: {r.reporter?.username || 'N/A'}</span><span>-</span><span className="text-yellow-400">{r.reason}</span></div>))}</div>}
                   </div>
@@ -1287,7 +1325,7 @@ function SuperAdminView() {
                     <h3 className="font-medium">Anuncios Existentes</h3>
                     <ScrollArea className="max-h-96"><div className="space-y-2">
                       {ads.map((ad: any) => (
-                        <div key={ad.id} className={`p-3 bg-gray-800 rounded-lg border ${ad.active ? 'border-gray-600' : 'border-red-800 opacity-50'}`}>
+                        <div key={ad.id} className={cn('p-3 bg-gray-800 rounded-lg border', ad.active ? 'border-gray-600' : 'border-red-800 opacity-50')}>
                           <div className="flex items-center justify-between"><div><p className="font-medium text-sm">{ad.title || 'Sin titulo'}</p><p className="text-xs text-gray-500">{ad.position} | {ad.displayStyle} | {ad.active ? 'Activo' : 'Inactivo'}</p></div><div className="flex gap-1"><Button size="sm" variant="outline" className="text-xs" onClick={() => { setEditingAdId(ad.id); setAdForm({ title: ad.title, imageUrl: ad.imageUrl, linkUrl: ad.linkUrl, position: ad.position, active: ad.active, showOnLogin: ad.showOnLogin, showOnMain: ad.showOnMain, displayStyle: ad.displayStyle, bgColor: ad.bgColor, textColor: ad.textColor, fontSize: ad.fontSize, borderRadius: ad.borderRadius, htmlContent: ad.htmlContent }) }}>Edit</Button><Button size="sm" variant="outline" className="text-xs" onClick={async () => { await fetch('/api/ads', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'toggle', id: ad.id }) }); loadAds() }}>{ad.active ? 'Off' : 'On'}</Button><Button size="sm" variant="outline" className="text-xs text-red-400" onClick={async () => { await fetch('/api/ads', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'delete', id: ad.id }) }); loadAds() }}>X</Button></div></div>
                         </div>
                       ))}
@@ -1395,9 +1433,9 @@ function MainView() {
             if (msg.type === 'chat') addMessage(partner?.username || 'Otro', msg.text)
             else if (msg.type === 'partner-info') {
               setPartner({ peerSocketId: msg.peerId, username: msg.username, gender: msg.gender, country: msg.country, countryCode: msg.countryCode })
-              addMessage('Sistema', `Conectado con ${msg.username} ${getCountryFlag(msg.countryCode)} ${msg.country}`)
+              addMessage('Sistema', 'Conectado con ' + msg.username + ' ' + getCountryFlag(msg.countryCode) + ' ' + msg.country)
               clearMessages()
-              addMessage('Sistema', `Conectado con ${msg.username} ${getCountryFlag(msg.countryCode)} ${msg.country}`)
+              addMessage('Sistema', 'Conectado con ' + msg.username + ' ' + getCountryFlag(msg.countryCode) + ' ' + msg.country)
             }
           } catch { addMessage(partner?.username || 'Otro', String(raw)) }
         })
@@ -1471,7 +1509,7 @@ function MainView() {
           countryCode: match.countryCode,
         })
         clearMessages()
-        addMessage('Sistema', `Conectado con ${match.username} ${getCountryFlag(match.countryCode)} ${match.country}`)
+        addMessage('Sistema', 'Conectado con ' + match.username + ' ' + getCountryFlag(match.countryCode) + ' ' + match.country)
 
         // Llamar al match via PeerJS (video)
         const call = globalPeer.call(match.peerId, globalStream!)
@@ -1504,7 +1542,7 @@ function MainView() {
             else if (msg.type === 'partner-info') {
               setPartner({ peerSocketId: msg.peerId, username: msg.username, gender: msg.gender, country: msg.country, countryCode: msg.countryCode })
               clearMessages()
-              addMessage('Sistema', `Conectado con ${msg.username} ${getCountryFlag(msg.countryCode)} ${msg.country}`)
+              addMessage('Sistema', 'Conectado con ' + msg.username + ' ' + getCountryFlag(msg.countryCode) + ' ' + msg.country)
             }
           } catch { addMessage(match.username, String(raw)) }
         })
@@ -1571,8 +1609,8 @@ function MainView() {
         {!partner && !isSearching && (
           <div className="flex-1 flex flex-col items-center justify-center gap-6">
             <div className="text-center"><h2 className="text-3xl font-bold mb-2">{getGenderShort(user?.gender || '')} Hola, {user?.username}</h2><p className="text-gray-400">Selecciona tus preferencias y busca alguien</p></div>
-            <Card className="w-full max-w-md bg-gray-900 border-gray-800"><CardContent className="p-4"><p className="text-sm text-gray-400 mb-3">Filtrar por pais:</p><div className="relative"><button onClick={() => setShowCountrySelect(!showCountrySelect)} className="w-full flex items-center justify-between p-3 bg-gray-800 rounded-lg border border-gray-700 hover:border-gray-500 transition-colors"><span className="flex items-center gap-2">{getCountryFlag(selectedCountry)} {getCountryName(selectedCountry)}</span><svg className={`w-4 h-4 transition-transform ${showCountrySelect ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg></button>{showCountrySelect && (<div className="absolute z-50 mt-1 w-full bg-gray-800 border border-gray-700 rounded-lg shadow-xl max-h-60 overflow-hidden"><div className="p-2"><Input placeholder="Buscar pais..." value={countrySearch} onChange={(e) => setCountrySearch(e.target.value)} className="bg-gray-700 border-gray-600 text-sm" autoFocus /></div><ScrollArea className="max-h-48">{filteredCountries.map((c) => (<button key={c.code} onClick={() => { setSelectedCountry(c.code); setShowCountrySelect(false); setCountrySearch('') }} className={`w-full text-left px-4 py-2 text-sm hover:bg-gray-700 transition-colors flex items-center gap-2 ${selectedCountry === c.code ? 'bg-purple-600/20 text-purple-300' : 'text-gray-300'}`}>{c.flag} {c.name}</button>))}</ScrollArea></div>)}</div></CardContent></Card>
-            <Card className="w-full max-w-md bg-gray-900 border-gray-800"><CardContent className="p-4"><p className="text-sm text-gray-400 mb-3">Tus intereses (opcional):</p><div className="flex flex-wrap gap-2">{HOBBIES.map((h) => (<button key={h.id} onClick={() => toggleHobby(h.id)} className={`px-3 py-1.5 rounded-full text-sm border transition-all ${hobbies.includes(h.id) ? 'bg-purple-600 border-purple-500 text-white' : 'bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-500'}`}>{h.icon} {h.label}</button>))}</div></CardContent></Card>
+            <Card className="w-full max-w-md bg-gray-900 border-gray-800"><CardContent className="p-4"><p className="text-sm text-gray-400 mb-3">Filtrar por pais:</p><div className="relative"><button onClick={() => setShowCountrySelect(!showCountrySelect)} className="w-full flex items-center justify-between p-3 bg-gray-800 rounded-lg border border-gray-700 hover:border-gray-500 transition-colors"><span className="flex items-center gap-2">{getCountryFlag(selectedCountry)} {getCountryName(selectedCountry)}</span><svg className={cn('w-4 h-4 transition-transform', showCountrySelect ? 'rotate-180' : '')} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg></button>{showCountrySelect && (<div className="absolute z-50 mt-1 w-full bg-gray-800 border border-gray-700 rounded-lg shadow-xl max-h-60 overflow-hidden"><div className="p-2"><Input placeholder="Buscar pais..." value={countrySearch} onChange={(e) => setCountrySearch(e.target.value)} className="bg-gray-700 border-gray-600 text-sm" autoFocus /></div><ScrollArea className="max-h-48">{filteredCountries.map((c) => (<button key={c.code} onClick={() => { setSelectedCountry(c.code); setShowCountrySelect(false); setCountrySearch('') }} className={cn('w-full text-left px-4 py-2 text-sm hover:bg-gray-700 transition-colors flex items-center gap-2', selectedCountry === c.code ? 'bg-purple-600/20 text-purple-300' : 'text-gray-300')}>{c.flag} {c.name}</button>))}</ScrollArea></div>)}</div></CardContent></Card>
+            <Card className="w-full max-w-md bg-gray-900 border-gray-800"><CardContent className="p-4"><p className="text-sm text-gray-400 mb-3">Tus intereses (opcional):</p><div className="flex flex-wrap gap-2">{HOBBIES.map((h) => (<button key={h.id} onClick={() => toggleHobby(h.id)} className={cn('px-3 py-1.5 rounded-full text-sm border transition-all', hobbies.includes(h.id) ? 'bg-purple-600 border-purple-500 text-white' : 'bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-500')}>{h.icon} {h.label}</button>))}</div></CardContent></Card>
             <Button onClick={handleSearch} className="bg-green-600 hover:bg-green-700 text-white font-bold px-12 py-7 text-xl rounded-2xl">Buscar Persona</Button>
           </div>
         )}
@@ -1581,7 +1619,7 @@ function MainView() {
           <div className="flex-1 flex flex-col gap-3">
             <div className="flex items-center justify-between bg-gray-900 rounded-lg px-4 py-2"><div className="flex items-center gap-2"><span>{getGenderShort(partner.gender)}</span><span className="font-medium">{partner.username}</span><span className="text-gray-400">{getCountryFlag(partner.countryCode)} {partner.country}</span></div></div>
             <div className="relative rounded-xl overflow-hidden bg-black flex-1 min-h-0"><video ref={remoteVideoRef} autoPlay playsInline className="w-full h-full object-cover" /><div className="absolute bottom-3 right-3 w-32 h-24 sm:w-40 sm:h-30 rounded-lg overflow-hidden border-2 border-purple-500 shadow-lg"><video ref={localVideoRef} autoPlay playsInline muted style={{ transform: 'scaleX(-1)' }} className="w-full h-full object-cover" /></div></div>
-            <div className="bg-gray-900 rounded-lg h-32 overflow-y-auto p-3 space-y-1">{messages.map((msg, i) => (<p key={i} className={`text-sm ${msg.from === 'Sistema' ? 'text-purple-400 italic' : msg.from === user?.username ? 'text-green-400' : 'text-gray-300'}`}><span className="font-medium">{msg.from}:</span> {msg.text}</p>))}<div ref={messagesEndRef} /></div>
+            <div className="bg-gray-900 rounded-lg h-32 overflow-y-auto p-3 space-y-1">{messages.map((msg, i) => (<p key={i} className={cn('text-sm', msg.from === 'Sistema' ? 'text-purple-400 italic' : msg.from === user?.username ? 'text-green-400' : 'text-gray-300')}><span className="font-medium">{msg.from}:</span> {msg.text}</p>))}<div ref={messagesEndRef} /></div>
             <div className="flex gap-2"><Input placeholder="Escribe un mensaje..." value={chatInput} onChange={(e) => setChatInput(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()} className="bg-gray-800 border-gray-700 text-white flex-1" /><Button onClick={handleSendMessage} className="bg-purple-600 hover:bg-purple-700">Enviar</Button></div>
             <div className="flex gap-2"><Button onClick={handleNext} className="flex-1 bg-blue-600 hover:bg-blue-700">Siguiente</Button><Button variant="outline" className="flex-1 border-red-600 text-red-400 hover:bg-red-600 hover:text-white" onClick={() => setShowReport(true)}>Reportar</Button></div>
           </div>

@@ -5,13 +5,10 @@
 import Peer, { DataConnection, MediaConnection } from 'peerjs'
 
 // Gun relay URL - el usuario despliega un relay gratuito en Render
-export const GUN_RELAY = process.env.NEXT_PUBLIC_GUN_RELAY || ''
-// Public fallback relays (reemplazar con relays activos)
+export const GUN_RELAY = process.env.NEXT_PUBLIC_GUN_RELAY || 'https://dhobbytv-gun.onrender.com/gun'
+// Tu relay propio en Render es el principal
 const PUBLIC_RELAYS = [
-  'https://gun-manhattan.herokuapp.com/gun',
-  'https://peer.wallie.io/gun',
-  'https://gundb-relay-mlccl.ondigitalocean.app/gun',
-  'https://gun-ams.pndo.xyz/gun',
+  'https://dhobbytv-gun.onrender.com/gun',
 ]
 
 // ==================== GUN.JS ====================
@@ -21,8 +18,8 @@ export async function getGun(): Promise<any> {
   if (gunInstance) return gunInstance
   const Gun = (await import('gun/gun')).default
   const peers: string[] = []
-  if (GUN_RELAY) peers.push(GUN_RELAY)
-  peers.push(...PUBLIC_RELAYS)
+  // Usar solo GUN_RELAY (tu Render relay) - evitar duplicados
+  if (GUN_RELAY && !peers.includes(GUN_RELAY)) peers.push(GUN_RELAY)
   gunInstance = Gun({
     peers,
     localStorage: false,

@@ -46,3 +46,25 @@ Stage Summary:
 - Changes pushed to GitHub, Vercel will auto-deploy
 - **IMPORTANT**: User must visit /api/setup-admin OR /api/setup-verify-queue once after deploy to create the verify_queue table in Supabase
 - This requires DATABASE_URL (PostgreSQL) to be set in Vercel environment variables
+---
+Task ID: 1
+Agent: Main
+Task: Fix 5 critical bugs in dhobbytv - Gun.js relays, audio, verified users, matchmaking, online count
+
+Work Log:
+- Verified Render services: dhobbytv-socket.onrender.com (alive, 404 = normal for socket.io), dhobbytv-gun.onrender.com (alive)
+- Tested all 4 public Gun.js relays: 3/4 DEAD (heroku shut down free dynos, others timeout)
+- Fixed p2p.ts to use only dhobbytv-gun.onrender.com/gun as relay (removed dead relays)
+- Added audio debugging: track logging on user and admin side, autoplay handling, userAudioReady indicator
+- Added verified users tab to SuperAdminView (was missing - only AdminView had it)
+- Added error handling to verify/reject buttons (now shows API errors instead of always showing success)
+- Fixed Turbopack build bug: replaced ALL 34 template literals with cn() calls and string concatenation
+- Build passes successfully
+
+Stage Summary:
+- Gun.js relay: FIXED (now uses dhobbytv-gun.onrender.com exclusively)
+- Online count + matchmaking: FIXED (depends on Gun relay, will work once deployed)
+- Audio: IMPROVED (better logging + autoplay handling + visual indicator; actual audio depends on user granting mic permission)
+- Verified users tab: FIXED (added to SuperAdmin)
+- Verify from pending: IMPROVED (error handling added; if API was failing, admin will now see the error)
+- Turbopack build: FIXED (all template literals replaced)
