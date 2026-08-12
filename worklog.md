@@ -68,3 +68,25 @@ Stage Summary:
 - Verified users tab: FIXED (added to SuperAdmin)
 - Verify from pending: IMPROVED (error handling added; if API was failing, admin will now see the error)
 - Turbopack build: FIXED (all template literals replaced)
+
+---
+Task ID: 3
+Agent: Main
+Task: Fix audio, matchmaking, online count, ban/suspend, pending verify + deploy
+
+Work Log:
+- **Audio fix**: Root cause = Chrome autoplay policy blocks unmuted video autoplay. Admin's remote video element had no `muted` attr. Fixed by: (1) starting video muted for autoplay, (2) adding click-to-unmute button overlay (red "Clic para escuchar audio" button), (3) resetting unmute state on back.
+- **Missing API route**: Admin/SuperAdmin ban/suspend buttons called `/api/admin-action` which didn't exist. Created `/api/admin-action/route.ts` handling ban/unban/suspend/unsuspend.
+- **Pending verify polling**: Improved from 5s to 3s interval, added HTTP error checking, added console logging for debugging, clearInterval on success.
+- **Matchmaking + Online count**: Added Gun.js public relay fallbacks (heroku-manhattan, peer.wallie.io) alongside dhobbytv-gun relay. Increased heartbeat to 10s, online window to 45s, match expiry to 90s. Added debug logging throughout.
+- **Verified users**: Confirmed API and rendering are correct - issue was deployment.
+- **Build**: All routes compile successfully, including new /api/admin-action.
+- **Deploy**: Committed and pushed to GitHub (juan182604/dhobbytv). Vercel auto-deploys from GitHub.
+
+Stage Summary:
+- Audio: FIXED (Chrome autoplay policy handled with muted start + click-to-unmute)
+- Ban/Suspend: FIXED (created missing /api/admin-action route)
+- Pending verify: IMPROVED (faster polling, better error handling)
+- Matchmaking: IMPROVED (multiple Gun relays, longer timeouts, debug logging)
+- Online count: IMPROVED (faster heartbeat, wider window, multiple relays)
+- All changes deployed to Vercel via GitHub push
