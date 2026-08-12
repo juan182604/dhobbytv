@@ -1420,6 +1420,7 @@ function MainView() {
 
   const localVideoRef = useRef<HTMLVideoElement>(null)
   const remoteVideoRef = useRef<HTMLVideoElement>(null)
+  const remoteStreamRef = useRef<MediaStream | null>(null)
   const dataConnRef = useRef<any>(null)
   const mediaCallRef = useRef<any>(null)
   const [chatInput, setChatInput] = useState('')
@@ -1435,8 +1436,29 @@ function MainView() {
   const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const [showChat, setShowChat] = useState(false)
   const [remoteMuted, setRemoteMuted] = useState(true)
+  const cleaningUpRef = useRef(false)
 
   useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages])
+
+  // CRITICAL FIX: Re-assign streams to video elements whenever partner state changes.
+  // React destroys/recreates video elements when switching between states (searching vs connected),
+  // so refs point to new empty elements. This effect ensures streams are always attached.
+  useEffect(() => {
+    // Attach local stream to whatever local video element exists now
+    if (localVideoRef.current && globalStream) {
+      if (localVideoRef.current.srcObject !== globalStream) {
+        console.log('[MAIN] Re-attaching local stream to video element')
+        localVideoRef.current.srcObject = globalStream
+      }
+    }
+    // Attach remote stream to whatever remote video element exists now
+    if (remoteVideoRef.current && remoteStreamRef.current) {
+      if (remoteVideoRef.current.srcObject !== remoteStreamRef.current) {
+        console.log('[MAIN] Re-attaching remote stream to video element')
+        remoteVideoRef.current.srcObject = remoteStreamRef.current
+      }
+    }
+  }, [partner]) // Run whenever partner changes (state transition)
 
   // Setup PeerJS + online count via Supabase API (NO Gun.js)
   // CRITICAL: Online registration happens IMMEDIATELY, not waiting for PeerJS
@@ -1520,22 +1542,23 @@ function MainView() {
         mediaCallRef.current = call
         call.on('stream', (remoteStream: MediaStream) => {
           console.log('[MAIN] Got remote stream (incoming call), tracks:', remoteStream.getTracks().map(t => t.kind))
+          remoteStreamRef.current = remoteStream
           if (remoteVideoRef.current && mounted) {
             remoteVideoRef.current.srcObject = remoteStream
-            // Auto-unmute remote audio on user interaction
-            const unmute = () => {
-              if (remoteVideoRef.current) {
-                remoteVideoRef.current.muted = false
-                setRemoteMuted(false)
-              }
-              document.removeEventListener('click', unmute)
-              document.removeEventListener('touchstart', unmute)
-            }
-            document.addEventListener('click', unmute, { once: true })
-            document.addEventListener('touchstart', unmute, { once: true })
           }
+          // Auto-unmute remote audio on user interaction
+          const unmute = () => {
+            if (remoteVideoRef.current) {
+              remoteVideoRef.current.muted = false
+              setRemoteMuted(false)
+            }
+            document.removeEventListener('click', unmute)
+            document.removeEventListener('touchstart', unmute)
+          }
+          document.addEventListener('click', unmute, { once: true })
+          document.addEventListener('touchstart', unmute, { once: true })
         })
-        call.on('close', () => { if (mounted) handleNext() })
+        call.on('close', () => { if (mounted && !cleaningUpRef.current) handleNextPerson() })
         call.on('error', (err) => { console.error('[MAIN] Incoming call error:', err) })
       })
 
@@ -1561,7 +1584,7 @@ function MainView() {
             }
           } catch { addMessage(partner?.username || 'Otro', String(raw)) }
         })
-        conn.on('close', () => { if (mounted && partner) handleNext() })
+        conn.on('close', () => { if (mounted && !cleaningUpRef.current && partner) handleNextPerson() })
         conn.on('error', (err) => { console.error('[MAIN] Data conn error:', err) })
       })
     }
@@ -1570,6 +1593,7 @@ function MainView() {
 
     return () => {
       mounted = false
+      cleaningUpRef.current = true
       if (searchPollRef.current) { clearInterval(searchPollRef.current); searchPollRef.current = null }
       if (onlinePollRef.current) { clearInterval(onlinePollRef.current); onlinePollRef.current = null }
       if (heartbeatRef.current) { clearInterval(heartbeatRef.current); heartbeatRef.current = null }
@@ -1590,16 +1614,27 @@ function MainView() {
     clearMessages()
     setPartner(null)
     setSearching(true)
+    setRemoteMuted(true)
+    remoteStreamRef.current = null
     matchedRef.current = false
+    setShowChat(false)
 
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
-      setGlobalStream(stream)
-      if (localVideoRef.current) localVideoRef.current.srcObject = stream
-    } catch {
-      toast.error('No se pudo acceder a la camara')
-      setSearching(false)
-      return
+    // Only get camera if we don't already have a stream
+    if (!globalStream) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+        setGlobalStream(stream)
+        if (localVideoRef.current) localVideoRef.current.srcObject = stream
+      } catch {
+        toast.error('No se pudo acceder a la camara')
+        setSearching(false)
+        return
+      }
+    } else {
+      // Re-attach existing stream to current video element
+      if (localVideoRef.current && localVideoRef.current.srcObject !== globalStream) {
+        localVideoRef.current.srcObject = globalStream
+      }
     }
 
     console.log('[MAIN] Joining matchmaking:', globalPeerId, 'filter:', selectedCountry)
@@ -1649,14 +1684,23 @@ function MainView() {
         const call = globalPeer!.call(match.peerId, globalStream!)
         mediaCallRef.current = call
         call.on('stream', (remoteStream: MediaStream) => {
-          console.log('[MAIN] Got remote stream (outgoing call)')
+          console.log('[MAIN] Got remote stream (outgoing call), tracks:', remoteStream.getTracks().map(t => t.kind))
+          remoteStreamRef.current = remoteStream
           if (remoteVideoRef.current) {
             remoteVideoRef.current.srcObject = remoteStream
-            remoteVideoRef.current.muted = false
-            setRemoteMuted(false)
           }
+          const unmute = () => {
+            if (remoteVideoRef.current) {
+              remoteVideoRef.current.muted = false
+              setRemoteMuted(false)
+            }
+            document.removeEventListener('click', unmute)
+            document.removeEventListener('touchstart', unmute)
+          }
+          document.addEventListener('click', unmute, { once: true })
+          document.addEventListener('touchstart', unmute, { once: true })
         })
-        call.on('close', () => { if (matchedRef.current) handleNext() })
+        call.on('close', () => { if (matchedRef.current && !cleaningUpRef.current) handleNextPerson() })
         call.on('error', (err) => { console.error('[MAIN] Call error:', err); addMessage('Sistema', 'Error de conexion P2P. Intenta de nuevo.') })
 
         // Data connection for chat
@@ -1674,7 +1718,7 @@ function MainView() {
             }
           } catch { addMessage(match.username, String(raw)) }
         })
-        conn.on('close', () => { if (matchedRef.current) handleNext() })
+        conn.on('close', () => { if (matchedRef.current && !cleaningUpRef.current) handleNextPerson() })
         conn.on('error', (err) => { console.error('[MAIN] Data conn error:', err) })
       } catch (e) {
         console.error('[MAIN] Match poll exception:', e)
@@ -1682,11 +1726,40 @@ function MainView() {
     }, 3000)
   }
 
-  const handleNext = useCallback(() => {
+  // NEXT PERSON: Close current call, KEEP camera stream, auto-search for next person
+  const handleNextPerson = useCallback(() => {
+    console.log('[MAIN] handleNextPerson - skipping to next person')
+    cleaningUpRef.current = true
+    matchedRef.current = false
+    setPartner(null)
+    clearMessages()
+    setRemoteMuted(true)
+    remoteStreamRef.current = null
+    if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null
+    if (searchPollRef.current) { clearInterval(searchPollRef.current); searchPollRef.current = null }
+    try { dataConnRef.current?.close() } catch {}
+    try { mediaCallRef.current?.close() } catch {}
+    dataConnRef.current = null
+    mediaCallRef.current = null
+    if (globalPeerId) fetch('/api/matchmaking', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'leave', peerId: globalPeerId }) }).catch(() => {})
+    // DO NOT stop the stream - keep camera alive for instant next search
+    cleaningUpRef.current = false
+    // Auto-start searching again
+    handleSearch()
+  }, [clearMessages, setPartner, setSearching, addMessage, selectedCountry, country, countryCode, hobbies, user])
+
+  // STOP: Close everything, kill camera, go back to home screen
+  const handleStop = useCallback(() => {
+    console.log('[MAIN] handleStop - stopping and going home')
+    cleaningUpRef.current = true
     matchedRef.current = false
     setPartner(null)
     clearMessages()
     setSearching(false)
+    setRemoteMuted(true)
+    remoteStreamRef.current = null
+    if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null
+    if (localVideoRef.current) localVideoRef.current.srcObject = null
     if (searchPollRef.current) { clearInterval(searchPollRef.current); searchPollRef.current = null }
     try { dataConnRef.current?.close() } catch {}
     try { mediaCallRef.current?.close() } catch {}
@@ -1695,7 +1768,8 @@ function MainView() {
     stopStream(globalStream)
     setGlobalStream(null)
     if (globalPeerId) fetch('/api/matchmaking', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'leave', peerId: globalPeerId }) }).catch(() => {})
-  }, [setPartner, clearMessages, setSearching])
+    cleaningUpRef.current = false
+  }, [clearMessages, setPartner, setSearching])
 
   const handleSendMessage = () => {
     if (!chatInput.trim()) return
@@ -1718,7 +1792,7 @@ function MainView() {
   }
 
   const handleLogout = () => {
-    handleNext()
+    handleStop()
     if (globalPeerId) fetch('/api/online-count', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'leave', peerId: globalPeerId }) }).catch(() => {})
     cleanupPeer(globalPeer)
     setGlobalPeer(null)
@@ -1836,7 +1910,7 @@ function MainView() {
 
           {/* Cancel button */}
           <div className="relative z-30 flex justify-center pb-6">
-            <button onClick={handleNext} className="bg-red-500/80 hover:bg-red-500 text-white font-bold px-10 py-3.5 rounded-full shadow-lg transition-all">
+            <button onClick={handleStop} className="bg-red-500/80 hover:bg-red-500 text-white font-bold px-10 py-3.5 rounded-full shadow-lg transition-all cursor-pointer">
               Detener
             </button>
           </div>
@@ -1911,14 +1985,17 @@ function MainView() {
 
           {/* Bottom controls */}
           <div className="flex items-center justify-center gap-2 px-3 py-2.5 bg-gray-900 border-t border-gray-800 shrink-0 z-30">
-            <button onClick={handleNext} className="bg-green-500 hover:bg-green-600 active:scale-95 text-white font-bold px-6 sm:px-8 py-2.5 rounded-full text-sm shadow-lg shadow-green-500/30 transition-all cursor-pointer">
+            <button onClick={handleNextPerson} className="bg-green-500 hover:bg-green-600 active:scale-95 text-white font-bold px-6 sm:px-8 py-2.5 rounded-full text-sm shadow-lg shadow-green-500/30 transition-all cursor-pointer">
               Siguiente
             </button>
-            <button onClick={() => setShowReport(true)} className="bg-red-500/80 hover:bg-red-500 active:scale-95 text-white font-bold px-6 sm:px-8 py-2.5 rounded-full text-sm shadow-lg transition-all cursor-pointer">
+            <button onClick={handleStop} className="bg-red-500/80 hover:bg-red-500 active:scale-95 text-white font-bold px-6 sm:px-8 py-2.5 rounded-full text-sm shadow-lg transition-all cursor-pointer">
               Parar
             </button>
             <button onClick={() => setShowChat(!showChat)} className={cn('rounded-full p-2.5 transition-all cursor-pointer', showChat ? 'bg-purple-600' : 'bg-white/10 hover:bg-white/20')}>
               <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" /></svg>
+            </button>
+            <button onClick={() => setShowReport(true)} className="rounded-full p-2.5 bg-white/10 hover:bg-white/20 transition-all cursor-pointer" title="Reportar">
+              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" /></svg>
             </button>
           </div>
         </div>
