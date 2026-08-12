@@ -4,7 +4,7 @@ import { getSupabaseClient } from '@/lib/db'
 // Presencia online usando tabla Announcement con prefijo ol_
 // Cada entrada: id = "ol_{peerId}", text = JSON({username, gender, isAdmin})
 
-const ONLINE_EXPIRE_MS = 45000 // 45 segundos sin heartbeat = offline
+const ONLINE_EXPIRE_MS = 60000 // 60 segundos sin heartbeat = offline
 const PREFIX = 'ol_'
 
 function toId(peerId: string) { return PREFIX + peerId }
@@ -16,8 +16,15 @@ export async function GET() {
 
     // Limpiar offline
     try {
-      await supabase.from('announcement').delete().like('id', PREFIX + '%').lt('createdAt', cutoff)
-    } catch {}
+      const { error: delErr } = await supabase
+        .from('announcement')
+        .delete()
+        .like('id', PREFIX + '%')
+        .lt('createdAt', cutoff)
+      if (delErr) console.error('[ONLINE-COUNT] Cleanup error:', delErr.message)
+    } catch (e) {
+      console.error('[ONLINE-COUNT] Cleanup exception:', e)
+    }
 
     // Contar online
     const { count, error } = await supabase
@@ -27,9 +34,15 @@ export async function GET() {
       .eq('active', true)
       .gte('createdAt', cutoff)
 
-    if (error) return NextResponse.json({ count: 0, error: error.message }, { status: 500 })
+    if (error) {
+      console.error('[ONLINE-COUNT] Count error:', error.message)
+      return NextResponse.json({ count: 0, error: error.message }, { status: 500 })
+    }
+
+    console.log('[ONLINE-COUNT] Current online:', count || 0)
     return NextResponse.json({ count: count || 0 })
   } catch (e) {
+    console.error('[ONLINE-COUNT] GET exception:', e)
     return NextResponse.json({ count: 0 }, { status: 200 })
   }
 }
@@ -41,16 +54,33 @@ export async function POST(request: Request) {
     const { action, peerId, username, gender, isAdmin } = body
 
     if (action === 'join' && peerId && username) {
+      const id = toId(peerId)
       const info = JSON.stringify({ username, gender: gender || '', isAdmin: !!isAdmin })
-      const { error } = await supabase.from('announcement').upsert({
-        id: toId(peerId),
-        text: info,
-        active: true,
-        createdAt: new Date().toISOString(),
-      }, { onConflict: 'id' })
 
-      if (error) return NextResponse.json({ error: error.message }, { status: 500 })
-      return NextResponse.json({ success: true })
+      // Primero intentar borrar si existe (limpieza)
+      try {
+        await supabase.from('announcement').delete().eq('id', id)
+      } catch {}
+
+      // Insertar nuevo
+      const { data, error } = await supabase
+        .from('announcement')
+        .insert({
+          id,
+          text: info,
+          active: true,
+          createdAt: new Date().toISOString(),
+        })
+        .select('id')
+        .single()
+
+      if (error) {
+        console.error('[ONLINE-COUNT] Join insert error:', error.message, 'id:', id)
+        return NextResponse.json({ error: error.message }, { status: 500 })
+      }
+
+      console.log('[ONLINE-COUNT] User joined:', username, 'id:', id)
+      return NextResponse.json({ success: true, id: data?.id })
     }
 
     if (action === 'heartbeat' && peerId) {
@@ -59,19 +89,26 @@ export async function POST(request: Request) {
         .update({ createdAt: new Date().toISOString() })
         .eq('id', toId(peerId))
 
-      if (error) return NextResponse.json({ error: 'No encontrado' }, { status: 404 })
+      if (error) {
+        console.error('[ONLINE-COUNT] Heartbeat error for:', peerId, error.message)
+      }
       return NextResponse.json({ success: true })
     }
 
     if (action === 'leave' && peerId) {
+      const id = toId(peerId)
       try {
-        await supabase.from('announcement').delete().eq('id', toId(peerId))
-      } catch {}
+        await supabase.from('announcement').delete().eq('id', id)
+        console.log('[ONLINE-COUNT] User left:', peerId)
+      } catch (e) {
+        console.error('[ONLINE-COUNT] Leave error:', e)
+      }
       return NextResponse.json({ success: true })
     }
 
     return NextResponse.json({ error: 'Accion no valida' }, { status: 400 })
   } catch (e) {
+    console.error('[ONLINE-COUNT] POST exception:', e)
     return NextResponse.json({ error: String(e) }, { status: 500 })
   }
 }

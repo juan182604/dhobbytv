@@ -26,15 +26,8 @@ import {
 import { Toaster, toast } from 'sonner'
 import { AdBanner, AdPopup } from './AdBanner'
 import {
-  getGun,
   genPeerId,
   createPeer,
-  goOnline,
-  goOffline,
-  watchOnlineCount,
-  joinSearching,
-  leaveSearching,
-  watchForMatch,
   cleanupPeer,
   stopStream,
 } from '@/lib/p2p'
@@ -43,12 +36,10 @@ import {
 // Persisten entre cambios de vista sin re-render
 let globalPeer: Peer | null = null
 let globalStream: MediaStream | null = null
-let globalGun: any = null
 let globalPeerId: string | null = null
 
 function setGlobalPeer(p: Peer | null) { globalPeer = p }
 function setGlobalStream(s: MediaStream | null) { globalStream = s }
-function setGlobalGun(g: any) { globalGun = g }
 function setGlobalPeerId(id: string | null) { globalPeerId = id }
 
 // ==================== CACHE GLOBAL PARA ADMIN ====================
@@ -913,16 +904,19 @@ function AdminView() {
       const setup = async () => {
         const peerId = genPeerId(user!.username + '_admin')
         setGlobalPeerId(peerId)
+
+        // Register online IMMEDIATELY (don't wait for PeerJS)
+        fetch('/api/online-count', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'join', peerId, username: user!.username, gender: user!.gender, isAdmin: true }) }).catch(() => {})
+        heartbeatRef.current = setInterval(() => {
+          fetch('/api/online-count', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'heartbeat', peerId: globalPeerId }) }).catch(() => {})
+        }, 10000)
+
+        // Setup PeerJS independently
         const peer = createPeer(peerId)
         setGlobalPeer(peer)
 
-        peer.on('open', async () => {
-          if (!mounted) return
-          setPeerReady(true)
-          fetch('/api/online-count', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'join', peerId, username: user!.username, gender: user!.gender, isAdmin: true }) }).catch(() => {})
-          heartbeatRef.current = setInterval(() => {
-            fetch('/api/online-count', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'heartbeat', peerId }) }).catch(() => {})
-          }, 10000)
+        peer.on('open', () => {
+          if (mounted) setPeerReady(true)
         })
 
         peer.on('error', () => { if (mounted) setPeerReady(false) })
@@ -1014,7 +1008,7 @@ function AdminView() {
             </Button>
             <Badge variant="outline" className={peerReady ? 'text-green-400 border-green-400' : 'text-red-400 border-red-400'}>{peerReady ? 'P2P Activo' : 'P2P Inactivo'}</Badge>
             <Badge variant="outline" className="text-green-400 border-green-400 text-xs">{onlineCount} online</Badge>
-            <Button variant="ghost" size="sm" className="text-gray-400" onClick={() => { cleanupPeer(globalPeer); setGlobalPeer(null); if (globalPeerId && globalGun) goOffline(globalGun, globalPeerId); useDhobbytvStore.getState().reset(); useDhobbytvStore.getState().setView('login') }}>Salir</Button>
+            <Button variant="ghost" size="sm" className="text-gray-400" onClick={() => { cleanupPeer(globalPeer); setGlobalPeer(null); if (globalPeerId) fetch('/api/online-count', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'leave', peerId: globalPeerId }) }).catch(() => {}); globalPeerId = null; useDhobbytvStore.getState().reset(); useDhobbytvStore.getState().setView('login') }}>Salir</Button>
           </div>
         </div>
       </header>
@@ -1168,16 +1162,19 @@ function SuperAdminView() {
       const setup = async () => {
         const peerId = genPeerId(user!.username + '_super')
         setGlobalPeerId(peerId)
+
+        // Register online IMMEDIATELY (don't wait for PeerJS)
+        fetch('/api/online-count', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'join', peerId, username: user!.username, gender: user!.gender, isAdmin: true }) }).catch(() => {})
+        heartbeatRef.current = setInterval(() => {
+          fetch('/api/online-count', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'heartbeat', peerId: globalPeerId }) }).catch(() => {})
+        }, 10000)
+
+        // Setup PeerJS independently
         const peer = createPeer(peerId)
         setGlobalPeer(peer)
 
-        peer.on('open', async () => {
-          if (!mounted) return
-          setPeerReady(true)
-          fetch('/api/online-count', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'join', peerId, username: user!.username, gender: user!.gender, isAdmin: true }) }).catch(() => {})
-          heartbeatRef.current = setInterval(() => {
-            fetch('/api/online-count', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'heartbeat', peerId }) }).catch(() => {})
-          }, 10000)
+        peer.on('open', () => {
+          if (mounted) setPeerReady(true)
         })
 
         peer.on('error', () => { if (mounted) setPeerReady(false) })
@@ -1261,7 +1258,7 @@ function SuperAdminView() {
             </Button>
             <Badge variant="outline" className={peerReady ? 'text-green-400 border-green-400' : 'text-red-400 border-red-400'}>{peerReady ? 'P2P Activo' : 'P2P Inactivo'}</Badge>
             <Badge variant="outline" className="text-green-400 border-green-400 text-xs">{onlineCount} online</Badge>
-            <Button variant="ghost" size="sm" className="text-gray-400" onClick={() => { cleanupPeer(globalPeer); setGlobalPeer(null); if (globalPeerId && globalGun) goOffline(globalGun, globalPeerId); useDhobbytvStore.getState().reset(); useDhobbytvStore.getState().setView('login') }}>Salir</Button>
+            <Button variant="ghost" size="sm" className="text-gray-400" onClick={() => { cleanupPeer(globalPeer); setGlobalPeer(null); if (globalPeerId) fetch('/api/online-count', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'leave', peerId: globalPeerId }) }).catch(() => {}); globalPeerId = null; useDhobbytvStore.getState().reset(); useDhobbytvStore.getState().setView('login') }}>Salir</Button>
           </div>
         </div>
       </header>
@@ -1439,23 +1436,31 @@ function MainView() {
   useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages])
 
   // Setup PeerJS + online count via Supabase API (NO Gun.js)
+  // CRITICAL: Online registration happens IMMEDIATELY, not waiting for PeerJS
   useEffect(() => {
     let mounted = true
 
     const setup = async () => {
       const peerId = genPeerId(user!.username)
       setGlobalPeerId(peerId)
-      const peer = createPeer(peerId)
-      setGlobalPeer(peer)
 
-      peer.on('open', async () => {
-        if (!mounted) return
-        fetch('/api/online-count', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'join', peerId, username: user!.username, gender: user!.gender, isAdmin: false }) }).catch(() => {})
-        heartbeatRef.current = setInterval(() => {
-          fetch('/api/online-count', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'heartbeat', peerId }) }).catch(() => {})
-        }, 10000)
-      })
+      // 1. Register online IMMEDIATELY via Supabase (don't wait for PeerJS)
+      console.log('[MAIN] Registering online:', peerId)
+      try {
+        const joinRes = await fetch('/api/online-count', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'join', peerId, username: user!.username, gender: user!.gender, isAdmin: false }) })
+        const joinData = await joinRes.json()
+        if (joinData.error) console.error('[MAIN] Online join error:', joinData.error)
+        else console.log('[MAIN] Online join OK:', joinData)
+      } catch (e) {
+        console.error('[MAIN] Online join exception:', e)
+      }
 
+      // 2. Start heartbeat immediately
+      heartbeatRef.current = setInterval(() => {
+        fetch('/api/online-count', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'heartbeat', peerId: globalPeerId }) }).catch(() => {})
+      }, 10000)
+
+      // 3. Start online count polling
       const fetchOnline = async () => {
         try {
           const res = await fetch('/api/online-count')
@@ -1465,6 +1470,18 @@ function MainView() {
       }
       fetchOnline()
       onlinePollRef.current = setInterval(fetchOnline, 5000)
+
+      // 4. Setup PeerJS for video/chat (independent of online presence)
+      const peer = createPeer(peerId)
+      setGlobalPeer(peer)
+
+      peer.on('open', () => {
+        console.log('[MAIN] PeerJS open:', peerId)
+      })
+
+      peer.on('error', (err) => {
+        console.error('[MAIN] PeerJS error:', err.type, err.message)
+      })
 
       peer.on('call', (call) => {
         if (!mounted || !globalStream) return
@@ -1514,7 +1531,7 @@ function MainView() {
   }, [])
 
   const handleSearch = async () => {
-    if (!globalPeer || !user) return
+    if (!globalPeerId || !user) return
     clearMessages()
     setPartner(null)
     setSearching(true)
@@ -1530,20 +1547,38 @@ function MainView() {
       return
     }
 
-    await fetch('/api/matchmaking', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'join', peerId: globalPeerId, username: user.username, gender: user.gender, country, countryCode, hobbies, countryFilter: selectedCountry }) }).catch(() => {})
+    console.log('[MAIN] Joining matchmaking:', globalPeerId, 'filter:', selectedCountry)
+    try {
+      const joinRes = await fetch('/api/matchmaking', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'join', peerId: globalPeerId, username: user.username, gender: user.gender, country, countryCode, hobbies, countryFilter: selectedCountry }) })
+      const joinData = await joinRes.json()
+      if (joinData.error) {
+        console.error('[MAIN] Matchmaking join error:', joinData.error)
+        toast.error('Error al buscar: ' + joinData.error)
+        setSearching(false)
+        return
+      }
+      console.log('[MAIN] Matchmaking join OK:', joinData)
+    } catch (e) {
+      console.error('[MAIN] Matchmaking join exception:', e)
+      toast.error('Error de conexion al buscar')
+      setSearching(false)
+      return
+    }
 
     if (searchPollRef.current) clearInterval(searchPollRef.current)
     searchPollRef.current = setInterval(async () => {
-      if (matchedRef.current || !globalPeer || !globalPeerId) return
+      if (matchedRef.current || !globalPeerId) return
       try {
         const res = await fetch('/api/matchmaking')
         const data = await res.json()
+        if (data.error) { console.error('[MAIN] Matchmaking poll error:', data.error); return }
         const candidates = (data.searching || []).filter((c: any) => {
           if (c.peerId === globalPeerId) return false
-          if (Date.now() - (c.timestamp || 0) > 90000) return false
+          if (Date.now() - (c.timestamp || 0) > 120000) return false
           if (selectedCountry !== 'all' && c.countryCode !== selectedCountry && c.country !== selectedCountry) return false
           return true
         })
+        console.log('[MAIN] Poll: pool=' + (data.searching || []).length + ' candidates=' + candidates.length)
         if (candidates.length === 0) return
         const match = candidates[0]
         matchedRef.current = true
@@ -1554,11 +1589,13 @@ function MainView() {
         setPartner({ peerSocketId: match.peerId, username: match.username, gender: match.gender, country: match.country, countryCode: match.countryCode })
         clearMessages()
         addMessage('Sistema', 'Conectado con ' + match.username + ' ' + getCountryFlag(match.countryCode) + ' ' + match.country)
-        const call = globalPeer.call(match.peerId, globalStream!)
+        console.log('[MAIN] Match found! Calling:', match.peerId)
+        const call = globalPeer!.call(match.peerId, globalStream!)
         mediaCallRef.current = call
         call.on('stream', (remoteStream: MediaStream) => { if (remoteVideoRef.current) remoteVideoRef.current.srcObject = remoteStream })
         call.on('close', () => { if (matchedRef.current) handleNext() })
-        const conn = globalPeer.connect(match.peerId, { reliable: true })
+        call.on('error', (err) => { console.error('[MAIN] Call error:', err); addMessage('Sistema', 'Error de conexion P2P. Intenta de nuevo.') })
+        const conn = globalPeer!.connect(match.peerId, { reliable: true })
         dataConnRef.current = conn
         conn.on('open', () => { conn.send(JSON.stringify({ type: 'partner-info', peerId: globalPeerId, username: user.username, gender: user.gender, country, countryCode })) })
         conn.on('data', (raw: any) => {
@@ -1573,7 +1610,10 @@ function MainView() {
           } catch { addMessage(match.username, String(raw)) }
         })
         conn.on('close', () => { if (matchedRef.current) handleNext() })
-      } catch {}
+        conn.on('error', (err) => { console.error('[MAIN] Data conn error:', err) })
+      } catch (e) {
+        console.error('[MAIN] Match poll exception:', e)
+      }
     }, 3000)
   }
 
@@ -1591,6 +1631,26 @@ function MainView() {
     setGlobalStream(null)
     if (globalPeerId) fetch('/api/matchmaking', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'leave', peerId: globalPeerId }) }).catch(() => {})
   }, [setPartner, clearMessages, setSearching])
+
+  const handleSendMessage = () => {
+    if (!chatInput.trim()) return
+    const conn = dataConnRef.current
+    if (conn && conn.open) {
+      conn.send(JSON.stringify({ type: 'chat', text: chatInput }))
+      addMessage(user?.username || 'Tu', chatInput)
+      setChatInput('')
+    }
+  }
+
+  const handleReport = async () => {
+    if (!partner || !user) return
+    try {
+      const res = await fetch('/api/report', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reportedUsername: partner.username, reporterUsername: user.username, reason: reportReason || 'Sin razon' }) })
+      const data = await res.json()
+      if (data.error) toast.error(data.error)
+      else { toast.success('Reportado exitosamente'); setShowReport(false); setReportReason('') }
+    } catch { toast.error('Error al reportar') }
+  }
 
   const handleLogout = () => {
     handleNext()
