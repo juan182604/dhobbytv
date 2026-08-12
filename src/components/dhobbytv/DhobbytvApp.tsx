@@ -898,30 +898,45 @@ function AdminView() {
     // Si ya hay un peer activo, reutilizarlo
     if (globalPeer && globalPeerId && !globalPeer.destroyed) {
       setPeerReady(true)
-      if (globalGun) {
-        unsubOnline = watchOnlineCount(globalGun, (count) => { if (mounted) setOnlineCount(count) })
+      // Poll online count via API
+      const fetchOnline = async () => {
+        try {
+          const res = await fetch('/api/online-count')
+          const data = await res.json()
+          if (mounted && data.count !== undefined) setOnlineCount(data.count)
+        } catch {}
       }
+      fetchOnline()
+      onlinePollRef.current = setInterval(fetchOnline, 5000)
+      fetch('/api/online-count', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'heartbeat', peerId: globalPeerId }) }).catch(() => {})
     } else {
       const setup = async () => {
-        const gun = await getGun()
-        if (!mounted) return
-        setGlobalGun(gun)
-
         const peerId = genPeerId(user!.username + '_admin')
         setGlobalPeerId(peerId)
         const peer = createPeer(peerId)
         setGlobalPeer(peer)
 
-        peer.on('open', () => {
+        peer.on('open', async () => {
           if (!mounted) return
           setPeerReady(true)
-          goOnline(gun, peerId, { username: user!.username, gender: user!.gender, country: '', countryCode: '', verified: true, isAdmin: true })
+          fetch('/api/online-count', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'join', peerId, username: user!.username, gender: user!.gender, isAdmin: true }) }).catch(() => {})
+          heartbeatRef.current = setInterval(() => {
+            fetch('/api/online-count', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'heartbeat', peerId }) }).catch(() => {})
+          }, 10000)
         })
 
         peer.on('error', () => { if (mounted) setPeerReady(false) })
 
-        // Escuchar conteo online (Gun.js)
-        unsubOnline = watchOnlineCount(gun, (count) => { if (mounted) setOnlineCount(count) })
+        // Poll online count via API (Supabase)
+        const fetchOnline = async () => {
+          try {
+            const res = await fetch('/api/online-count')
+            const data = await res.json()
+            if (mounted && data.count !== undefined) setOnlineCount(data.count)
+          } catch {}
+        }
+        fetchOnline()
+        onlinePollRef.current = setInterval(fetchOnline, 5000)
       }
 
       setup()
@@ -933,7 +948,9 @@ function AdminView() {
     return () => {
       mounted = false
       clearInterval(refreshInterval)
-      // NO destruimos peer/gun aqui - se reutilizan si volvemos rapido
+      if (onlinePollRef.current) clearInterval(onlinePollRef.current)
+      if (heartbeatRef.current) clearInterval(heartbeatRef.current)
+      if (globalPeerId) fetch('/api/online-count', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'leave', peerId: globalPeerId }) }).catch(() => {})
     }
   }, [])
 
@@ -958,6 +975,8 @@ function AdminView() {
   const [suspendHours, setSuspendHours] = useState('24')
   const [selectedReportedUser, setSelectedReportedUser] = useState<any>(null)
   const [refreshing, setRefreshing] = useState(false)
+  const onlinePollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const handleRefresh = async () => {
     setRefreshing(true)
@@ -1135,29 +1154,43 @@ function SuperAdminView() {
     // Si ya hay un peer activo, reutilizarlo
     if (globalPeer && globalPeerId && !globalPeer.destroyed) {
       setPeerReady(true)
-      if (globalGun) {
-        unsubOnline = watchOnlineCount(globalGun, (count) => { if (mounted) setOnlineCount(count) })
+      const fetchOnline = async () => {
+        try {
+          const res = await fetch('/api/online-count')
+          const data = await res.json()
+          if (mounted && data.count !== undefined) setOnlineCount(data.count)
+        } catch {}
       }
+      fetchOnline()
+      onlinePollRef.current = setInterval(fetchOnline, 5000)
+      fetch('/api/online-count', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'heartbeat', peerId: globalPeerId }) }).catch(() => {})
     } else {
       const setup = async () => {
-        const gun = await getGun()
-        if (!mounted) return
-        setGlobalGun(gun)
-
         const peerId = genPeerId(user!.username + '_super')
         setGlobalPeerId(peerId)
         const peer = createPeer(peerId)
         setGlobalPeer(peer)
 
-        peer.on('open', () => {
+        peer.on('open', async () => {
           if (!mounted) return
           setPeerReady(true)
-          goOnline(gun, peerId, { username: user!.username, gender: user!.gender, country: '', countryCode: '', verified: true, isAdmin: true })
+          fetch('/api/online-count', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'join', peerId, username: user!.username, gender: user!.gender, isAdmin: true }) }).catch(() => {})
+          heartbeatRef.current = setInterval(() => {
+            fetch('/api/online-count', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'heartbeat', peerId }) }).catch(() => {})
+          }, 10000)
         })
 
         peer.on('error', () => { if (mounted) setPeerReady(false) })
 
-        unsubOnline = watchOnlineCount(gun, (count) => { if (mounted) setOnlineCount(count) })
+        const fetchOnline = async () => {
+          try {
+            const res = await fetch('/api/online-count')
+            const data = await res.json()
+            if (mounted && data.count !== undefined) setOnlineCount(data.count)
+          } catch {}
+        }
+        fetchOnline()
+        onlinePollRef.current = setInterval(fetchOnline, 5000)
       }
       setup()
     }
@@ -1169,7 +1202,9 @@ function SuperAdminView() {
     return () => {
       mounted = false
       clearInterval(refreshInterval)
-      // NO destruimos peer/gun aqui - se reutilizan si volvemos rapido
+      if (onlinePollRef.current) clearInterval(onlinePollRef.current)
+      if (heartbeatRef.current) clearInterval(heartbeatRef.current)
+      if (globalPeerId) fetch('/api/online-count', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'leave', peerId: globalPeerId }) }).catch(() => {})
     }
   }, [])
 
@@ -1201,6 +1236,8 @@ function SuperAdminView() {
   const [suspendHours, setSuspendHours] = useState('24')
   const [selectedReportedUser, setSelectedReportedUser] = useState<any>(null)
   const [refreshing, setRefreshing] = useState(false)
+  const onlinePollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const handleRefresh = async () => {
     setRefreshing(true)
@@ -1364,7 +1401,7 @@ function SuperAdminView() {
   )
 }
 
-// ==================== MAIN VIEW (Gun.js matchmaking + PeerJS video/chat) ====================
+// ==================== MAIN VIEW (Supabase matchmaking + PeerJS video/chat) ====================
 function MainView() {
   const user = useDhobbytvStore((s) => s.user)
   const partner = useDhobbytvStore((s) => s.partner)
@@ -1395,57 +1432,52 @@ function MainView() {
   const [showCountrySelect, setShowCountrySelect] = useState(false)
   const [countrySearch, setCountrySearch] = useState('')
   const matchedRef = useRef(false)
+  const searchPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const onlinePollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages])
 
-  // Setup Gun.js + PeerJS
+  // Setup PeerJS + online count via Supabase API (NO Gun.js)
   useEffect(() => {
     let mounted = true
-    let unsubOnline: (() => void) | null = null
-    let unsubMatch: (() => void) | null = null
 
     const setup = async () => {
-      const gun = await getGun()
-      if (!mounted) return
-      setGlobalGun(gun)
-
       const peerId = genPeerId(user!.username)
       setGlobalPeerId(peerId)
       const peer = createPeer(peerId)
       setGlobalPeer(peer)
 
-      peer.on('open', () => {
+      peer.on('open', async () => {
         if (!mounted) return
-        // Registrarse online
-        goOnline(gun, peerId, {
-          username: user!.username, gender: user!.gender,
-          country, countryCode, verified: true, isAdmin: false,
-        })
+        fetch('/api/online-count', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'join', peerId, username: user!.username, gender: user!.gender, isAdmin: false }) }).catch(() => {})
+        heartbeatRef.current = setInterval(() => {
+          fetch('/api/online-count', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'heartbeat', peerId }) }).catch(() => {})
+        }, 10000)
       })
 
-      // Escuchar conteo online
-      unsubOnline = watchOnlineCount(gun, (count) => { if (mounted) setOnlineCount(count) })
+      const fetchOnline = async () => {
+        try {
+          const res = await fetch('/api/online-count')
+          const data = await res.json()
+          if (mounted && data.count !== undefined) setOnlineCount(data.count)
+        } catch {}
+      }
+      fetchOnline()
+      onlinePollRef.current = setInterval(fetchOnline, 5000)
 
-      // Escuchar llamadas entrantes (cuando otro user nos encuentra)
       peer.on('call', (call) => {
         if (!mounted || !globalStream) return
         call.answer(globalStream)
         mediaCallRef.current = call
-
-        call.on('stream', (remoteStream: MediaStream) => {
-          if (remoteVideoRef.current && mounted) remoteVideoRef.current.srcObject = remoteStream
-        })
-
+        call.on('stream', (remoteStream: MediaStream) => { if (remoteVideoRef.current && mounted) remoteVideoRef.current.srcObject = remoteStream })
         call.on('close', () => { if (mounted) handleNext() })
       })
 
-      // Escuchar conexiones de datos entrantes (chat del otro user)
       peer.on('connection', (conn) => {
         if (!mounted) return
         dataConnRef.current = conn
-
         conn.on('open', () => { setSearching(false) })
-
         conn.on('data', (raw: any) => {
           if (!mounted) return
           try {
@@ -1453,13 +1485,11 @@ function MainView() {
             if (msg.type === 'chat') addMessage(partner?.username || 'Otro', msg.text)
             else if (msg.type === 'partner-info') {
               setPartner({ peerSocketId: msg.peerId, username: msg.username, gender: msg.gender, country: msg.country, countryCode: msg.countryCode })
-              addMessage('Sistema', 'Conectado con ' + msg.username + ' ' + getCountryFlag(msg.countryCode) + ' ' + msg.country)
               clearMessages()
               addMessage('Sistema', 'Conectado con ' + msg.username + ' ' + getCountryFlag(msg.countryCode) + ' ' + msg.country)
             }
           } catch { addMessage(partner?.username || 'Otro', String(raw)) }
         })
-
         conn.on('close', () => { if (mounted) handleNext() })
       })
     }
@@ -1468,14 +1498,15 @@ function MainView() {
 
     return () => {
       mounted = false
-      if (unsubOnline) unsubOnline()
-      if (unsubMatch) unsubMatch()
+      if (searchPollRef.current) { clearInterval(searchPollRef.current); searchPollRef.current = null }
+      if (onlinePollRef.current) { clearInterval(onlinePollRef.current); onlinePollRef.current = null }
+      if (heartbeatRef.current) { clearInterval(heartbeatRef.current); heartbeatRef.current = null }
+      if (globalPeerId) {
+        fetch('/api/online-count', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'leave', peerId: globalPeerId }) }).catch(() => {})
+        fetch('/api/matchmaking', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'leave', peerId: globalPeerId }) }).catch(() => {})
+      }
       stopStream(globalStream)
       setGlobalStream(null)
-      if (globalPeerId && globalGun) {
-        leaveSearching(globalGun, globalPeerId)
-        goOffline(globalGun, globalPeerId)
-      }
       cleanupPeer(globalPeer)
       setGlobalPeer(null)
       setGlobalPeerId(null)
@@ -1483,13 +1514,12 @@ function MainView() {
   }, [])
 
   const handleSearch = async () => {
-    if (!globalPeer || !globalGun || !user) return
+    if (!globalPeer || !user) return
     clearMessages()
     setPartner(null)
     setSearching(true)
     matchedRef.current = false
 
-    // Obtener camara
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
       setGlobalStream(stream)
@@ -1500,61 +1530,37 @@ function MainView() {
       return
     }
 
-    // Escribir preferencias en Gun.js
-    joinSearching(globalGun, globalPeerId!, {
-      username: user.username, gender: user.gender,
-      country, countryCode, hobbies, countryFilter: selectedCountry,
-    })
+    await fetch('/api/matchmaking', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'join', peerId: globalPeerId, username: user.username, gender: user.gender, country, countryCode, hobbies, countryFilter: selectedCountry }) }).catch(() => {})
 
-    // Buscar match
-    const unsub = watchForMatch(
-      globalGun, globalPeerId!,
-      { countryFilter: selectedCountry, hobbies, gender: user.gender },
-      async (match) => {
-        if (matchedRef.current || !globalPeer || !globalGun) return
-        matchedRef.current = true
-        unsub() // dejar de escuchar
-
-        // Remover ambos de searching
-        leaveSearching(globalGun, globalPeerId!)
-        leaveSearching(globalGun, match.peerId)
-        setSearching(false)
-
-        // Establecer partner info
-        setPartner({
-          peerSocketId: match.peerId,
-          username: match.username,
-          gender: match.gender,
-          country: match.country,
-          countryCode: match.countryCode,
+    if (searchPollRef.current) clearInterval(searchPollRef.current)
+    searchPollRef.current = setInterval(async () => {
+      if (matchedRef.current || !globalPeer || !globalPeerId) return
+      try {
+        const res = await fetch('/api/matchmaking')
+        const data = await res.json()
+        const candidates = (data.searching || []).filter((c: any) => {
+          if (c.peerId === globalPeerId) return false
+          if (Date.now() - (c.timestamp || 0) > 90000) return false
+          if (selectedCountry !== 'all' && c.countryCode !== selectedCountry && c.country !== selectedCountry) return false
+          return true
         })
+        if (candidates.length === 0) return
+        const match = candidates[0]
+        matchedRef.current = true
+        if (searchPollRef.current) { clearInterval(searchPollRef.current); searchPollRef.current = null }
+        fetch('/api/matchmaking', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'leave', peerId: globalPeerId }) }).catch(() => {})
+        fetch('/api/matchmaking', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'leave', peerId: match.peerId }) }).catch(() => {})
+        setSearching(false)
+        setPartner({ peerSocketId: match.peerId, username: match.username, gender: match.gender, country: match.country, countryCode: match.countryCode })
         clearMessages()
         addMessage('Sistema', 'Conectado con ' + match.username + ' ' + getCountryFlag(match.countryCode) + ' ' + match.country)
-
-        // Llamar al match via PeerJS (video)
         const call = globalPeer.call(match.peerId, globalStream!)
         mediaCallRef.current = call
-
-        call.on('stream', (remoteStream: MediaStream) => {
-          if (remoteVideoRef.current) remoteVideoRef.current.srcObject = remoteStream
-        })
-
+        call.on('stream', (remoteStream: MediaStream) => { if (remoteVideoRef.current) remoteVideoRef.current.srcObject = remoteStream })
         call.on('close', () => { if (matchedRef.current) handleNext() })
-
-        // Conectar data channel (chat)
         const conn = globalPeer.connect(match.peerId, { reliable: true })
         dataConnRef.current = conn
-
-        conn.on('open', () => {
-          // Enviar info del partner
-          conn.send(JSON.stringify({
-            type: 'partner-info',
-            peerId: globalPeerId,
-            username: user.username, gender: user.gender,
-            country, countryCode,
-          }))
-        })
-
+        conn.on('open', () => { conn.send(JSON.stringify({ type: 'partner-info', peerId: globalPeerId, username: user.username, gender: user.gender, country, countryCode })) })
         conn.on('data', (raw: any) => {
           try {
             const msg = typeof raw === 'string' ? JSON.parse(raw) : raw
@@ -1562,14 +1568,13 @@ function MainView() {
             else if (msg.type === 'partner-info') {
               setPartner({ peerSocketId: msg.peerId, username: msg.username, gender: msg.gender, country: msg.country, countryCode: msg.countryCode })
               clearMessages()
-              addMessage('Sistema', 'Conectado con ' + msg.username + ' ' + getCountryFlag(msg.countryCode) + ' ' + msg.country)
+              addMessage('Sistema', 'Conectado con ' + msg.username + ' ' + getCountryFlag(msg.countryCode) + ' ' + match.country)
             }
           } catch { addMessage(match.username, String(raw)) }
         })
-
         conn.on('close', () => { if (matchedRef.current) handleNext() })
-      }
-    )
+      } catch {}
+    }, 3000)
   }
 
   const handleNext = useCallback(() => {
@@ -1577,36 +1582,19 @@ function MainView() {
     setPartner(null)
     clearMessages()
     setSearching(false)
+    if (searchPollRef.current) { clearInterval(searchPollRef.current); searchPollRef.current = null }
     try { dataConnRef.current?.close() } catch {}
     try { mediaCallRef.current?.close() } catch {}
     dataConnRef.current = null
     mediaCallRef.current = null
     stopStream(globalStream)
     setGlobalStream(null)
-    if (globalPeerId && globalGun) leaveSearching(globalGun, globalPeerId)
-    if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null
-    if (localVideoRef.current) localVideoRef.current.srcObject = null
+    if (globalPeerId) fetch('/api/matchmaking', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'leave', peerId: globalPeerId }) }).catch(() => {})
   }, [setPartner, clearMessages, setSearching])
-
-  const handleSendMessage = () => {
-    if (!chatInput.trim() || !dataConnRef.current) return
-    dataConnRef.current.send(JSON.stringify({ type: 'chat', text: chatInput }))
-    addMessage(user?.username || 'Tu', chatInput)
-    setChatInput('')
-  }
-
-  const handleReport = async () => {
-    if (!partner || !reportReason || !user) return
-    await fetch('/api/report', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reportedUsername: partner.username, reporterUsername: user.username, reason: reportReason }) })
-    toast.success('Reporte enviado')
-    setShowReport(false)
-    setReportReason('')
-    handleNext()
-  }
 
   const handleLogout = () => {
     handleNext()
-    if (globalPeerId && globalGun) goOffline(globalGun, globalPeerId)
+    if (globalPeerId) fetch('/api/online-count', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'leave', peerId: globalPeerId }) }).catch(() => {})
     cleanupPeer(globalPeer)
     setGlobalPeer(null)
     setGlobalPeerId(null)
@@ -1650,7 +1638,7 @@ function MainView() {
   )
 }
 
-// ==================== MAIN APP ====================
+
 export default function DhobbytvApp() {
   const view = useDhobbytvStore((s) => s.view)
   const setCountry = useDhobbytvStore((s) => s.setCountry)
