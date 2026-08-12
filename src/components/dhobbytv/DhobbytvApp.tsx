@@ -1491,6 +1491,15 @@ function MainView() {
         if (!mounted) return
         console.log('[MAIN] Incoming call from:', call.peer)
 
+        // Stop polling - we got matched!
+        matchedRef.current = true
+        if (searchPollRef.current) { clearInterval(searchPollRef.current); searchPollRef.current = null }
+        // Remove ourselves from matchmaking
+        if (globalPeerId) {
+          fetch('/api/matchmaking', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'leave', peerId: globalPeerId }) }).catch(() => {})
+        }
+        setSearching(false)
+
         // Get camera if we don't have a stream yet
         if (!globalStream) {
           try {
@@ -1503,19 +1512,27 @@ function MainView() {
           }
         }
 
+        // Set a temporary partner so UI switches to split screen
+        setPartner({ peerSocketId: call.peer, username: 'Conectando...', gender: '', country: '', countryCode: '' })
+
+        // Answer with our stream so the caller sees/hears us
         call.answer(globalStream!)
         mediaCallRef.current = call
         call.on('stream', (remoteStream: MediaStream) => {
-          console.log('[MAIN] Got remote stream (incoming call)')
+          console.log('[MAIN] Got remote stream (incoming call), tracks:', remoteStream.getTracks().map(t => t.kind))
           if (remoteVideoRef.current && mounted) {
             remoteVideoRef.current.srcObject = remoteStream
             // Auto-unmute remote audio on user interaction
             const unmute = () => {
-              remoteVideoRef.current!.muted = false
-              setRemoteMuted(false)
+              if (remoteVideoRef.current) {
+                remoteVideoRef.current.muted = false
+                setRemoteMuted(false)
+              }
               document.removeEventListener('click', unmute)
+              document.removeEventListener('touchstart', unmute)
             }
             document.addEventListener('click', unmute, { once: true })
+            document.addEventListener('touchstart', unmute, { once: true })
           }
         })
         call.on('close', () => { if (mounted) handleNext() })
@@ -1525,7 +1542,13 @@ function MainView() {
       peer.on('connection', (conn) => {
         if (!mounted) return
         dataConnRef.current = conn
-        conn.on('open', () => { setSearching(false) })
+        conn.on('open', () => {
+          setSearching(false)
+          // If we were called (not the caller), we need to know it's connected
+          if (matchedRef.current && !partner) {
+            setPartner({ peerSocketId: conn.peer, username: 'Conectando...', gender: '', country: '', countryCode: '' })
+          }
+        })
         conn.on('data', (raw: any) => {
           if (!mounted) return
           try {
@@ -1538,7 +1561,8 @@ function MainView() {
             }
           } catch { addMessage(partner?.username || 'Otro', String(raw)) }
         })
-        conn.on('close', () => { if (mounted) handleNext() })
+        conn.on('close', () => { if (mounted && partner) handleNext() })
+        conn.on('error', (err) => { console.error('[MAIN] Data conn error:', err) })
       })
     }
 
@@ -1819,47 +1843,55 @@ function MainView() {
         </div>
       )}
 
-      {/* STATE 3: Connected - Split screen video call (OmeTV style) */}
+      {/* STATE 3: Connected - SPLIT SCREEN video call (Omegle style) */}
       {partner && (
-        <div className="flex-1 flex flex-col relative">
+        <div className="h-full w-full flex flex-col overflow-hidden bg-gray-950">
           {/* Top bar */}
-          <div className="absolute top-0 left-0 right-0 z-30 flex items-center justify-between px-3 py-2 bg-gradient-to-b from-black/80 to-transparent">
+          <div className="flex items-center justify-between px-3 py-2 bg-gray-900 border-b border-gray-800 shrink-0 z-30">
             <div className="flex items-center gap-2">
               <h1 className="text-sm font-black"><span className="text-purple-400">dhobby</span><span className="text-green-400">tv</span></h1>
-              <div className="bg-black/50 rounded-full px-2.5 py-1 flex items-center gap-1.5">
+              <div className="flex items-center gap-1.5 bg-black/50 rounded-full px-2.5 py-1">
                 <div className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
                 <span className="text-green-400 text-[10px] font-medium">{onlineCount} online</span>
               </div>
             </div>
-            <div className="flex items-center gap-1.5 bg-black/50 rounded-full px-3 py-1">
+            <div className="flex items-center gap-1.5 bg-gray-800 rounded-full px-3 py-1">
               <span>{getGenderShort(partner.gender)}</span>
               <span className="text-white text-xs font-medium">{partner.username}</span>
               <span className="text-gray-400 text-xs">{getCountryFlag(partner.countryCode)} {partner.country}</span>
             </div>
           </div>
 
-          {/* Video area: split screen on desktop, full remote + PiP on mobile */}
-          <div className="flex-1 flex relative min-h-0">
-            {/* Remote video (stranger) - full background */}
-            <video ref={remoteVideoRef} autoPlay playsInline className="absolute inset-0 w-full h-full object-cover bg-gray-900" />
-            {remoteMuted && (
-              <button onClick={() => { if (remoteVideoRef.current) { remoteVideoRef.current.muted = false; setRemoteMuted(false) } }} className="absolute top-16 left-1/2 -translate-x-1/2 z-40 bg-red-600 hover:bg-red-700 text-white rounded-full px-4 py-2 text-sm font-medium shadow-lg flex items-center gap-2 animate-pulse">
-                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.536 8.464a5 5 0 010 7.072M12 6.253v11.494M17.657 6.343a8 8 0 010 11.314M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" /></svg>
-                Clic para escuchar
-              </button>
-            )}
-
-            {/* Local video (PiP) */}
-            <div className="absolute bottom-24 sm:bottom-20 right-3 w-28 h-20 sm:w-36 sm:h-28 rounded-xl overflow-hidden border-2 border-purple-500 shadow-xl z-20">
-              <video ref={localVideoRef} autoPlay playsInline muted style={{ transform: 'scaleX(-1)' }} className="w-full h-full object-cover" />
+          {/* SPLIT SCREEN: 50/50 horizontal on desktop, vertical on mobile */}
+          <div className="flex-1 flex flex-col sm:flex-row min-h-0 relative">
+            {/* Remote video (stranger) - TOP on mobile, LEFT on desktop */}
+            <div className="relative flex-1 bg-gray-900 min-h-0 border-b sm:border-b-0 sm:border-r border-gray-800">
+              <video ref={remoteVideoRef} autoPlay playsInline className="w-full h-full object-cover bg-gray-900" />
+              {remoteMuted && (
+                <button onClick={() => { if (remoteVideoRef.current) { remoteVideoRef.current.muted = false; setRemoteMuted(false) } }} className="absolute top-3 left-1/2 -translate-x-1/2 z-40 bg-red-600/90 hover:bg-red-600 text-white rounded-full px-4 py-2 text-xs font-medium shadow-lg flex items-center gap-2 animate-pulse cursor-pointer">
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.536 8.464a5 5 0 010 7.072M12 6.253v11.494M17.657 6.343a8 8 0 010 11.314M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" /></svg>
+                  Clic para escuchar
+                </button>
+              )}
+              <div className="absolute bottom-2 left-2 bg-black/60 rounded-full px-2.5 py-1 text-[10px] text-gray-300 font-medium">
+                {partner.username} {getGenderShort(partner.gender)} {getCountryFlag(partner.countryCode)}
+              </div>
             </div>
 
-            {/* Chat panel (toggle) */}
+            {/* Local video (you) - BOTTOM on mobile, RIGHT on desktop */}
+            <div className="relative flex-1 bg-gray-900 min-h-0">
+              <video ref={localVideoRef} autoPlay playsInline muted style={{ transform: 'scaleX(-1)' }} className="w-full h-full object-cover bg-gray-900" />
+              <div className="absolute bottom-2 left-2 bg-black/60 rounded-full px-2.5 py-1 text-[10px] text-green-400 font-medium">
+                Tu {getGenderShort(user?.gender || '')}
+              </div>
+            </div>
+
+            {/* Chat panel (overlay, toggle) */}
             {showChat && (
-              <div className="absolute bottom-20 left-3 right-3 sm:left-auto sm:right-48 sm:w-80 z-20 bg-black/80 backdrop-blur-md rounded-xl border border-gray-700 flex flex-col max-h-56">
-                <div className="px-3 py-2 border-b border-gray-700 flex items-center justify-between">
+              <div className="absolute bottom-16 sm:bottom-20 left-2 right-2 sm:left-auto sm:right-2 sm:w-80 z-20 bg-black/85 backdrop-blur-md rounded-xl border border-gray-700 flex flex-col" style={{ maxHeight: '40%' }}>
+                <div className="px-3 py-2 border-b border-gray-700 flex items-center justify-between shrink-0">
                   <span className="text-xs text-gray-400 font-medium">Chat</span>
-                  <button onClick={() => setShowChat(false)} className="text-gray-400 hover:text-white text-xs">Cerrar</button>
+                  <button onClick={() => setShowChat(false)} className="text-gray-400 hover:text-white text-xs cursor-pointer">X</button>
                 </div>
                 <div className="flex-1 overflow-y-auto p-2 space-y-1 min-h-0">
                   {messages.map((msg, i) => (
@@ -1869,23 +1901,23 @@ function MainView() {
                   ))}
                   <div ref={messagesEndRef} />
                 </div>
-                <div className="p-2 border-t border-gray-700 flex gap-1.5">
+                <div className="p-2 border-t border-gray-700 flex gap-1.5 shrink-0">
                   <input placeholder="Mensaje..." value={chatInput} onChange={(e) => setChatInput(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()} className="flex-1 bg-gray-800 border-gray-600 rounded-lg px-2.5 py-1.5 text-xs text-white outline-none focus:border-purple-500" />
-                  <button onClick={handleSendMessage} className="bg-purple-600 hover:bg-purple-700 rounded-lg px-3 py-1.5 text-xs font-medium">Enviar</button>
+                  <button onClick={handleSendMessage} className="bg-purple-600 hover:bg-purple-700 rounded-lg px-3 py-1.5 text-xs font-medium cursor-pointer">Enviar</button>
                 </div>
               </div>
             )}
           </div>
 
-          {/* Bottom controls (OmeTV style buttons) */}
-          <div className="relative z-30 flex items-center justify-center gap-2 px-3 py-3 bg-black/60 backdrop-blur-sm">
-            <button onClick={handleNext} className="bg-green-500 hover:bg-green-600 active:scale-95 text-white font-bold px-6 sm:px-8 py-2.5 sm:py-3 rounded-full text-sm sm:text-base shadow-lg shadow-green-500/30 transition-all">
+          {/* Bottom controls */}
+          <div className="flex items-center justify-center gap-2 px-3 py-2.5 bg-gray-900 border-t border-gray-800 shrink-0 z-30">
+            <button onClick={handleNext} className="bg-green-500 hover:bg-green-600 active:scale-95 text-white font-bold px-6 sm:px-8 py-2.5 rounded-full text-sm shadow-lg shadow-green-500/30 transition-all cursor-pointer">
               Siguiente
             </button>
-            <button onClick={() => setShowReport(true)} className="bg-red-500/80 hover:bg-red-500 active:scale-95 text-white font-bold px-6 sm:px-8 py-2.5 sm:py-3 rounded-full text-sm sm:text-base shadow-lg transition-all">
+            <button onClick={() => setShowReport(true)} className="bg-red-500/80 hover:bg-red-500 active:scale-95 text-white font-bold px-6 sm:px-8 py-2.5 rounded-full text-sm shadow-lg transition-all cursor-pointer">
               Parar
             </button>
-            <button onClick={() => setShowChat(!showChat)} className={cn('rounded-full p-2.5 transition-all', showChat ? 'bg-purple-600' : 'bg-white/10 hover:bg-white/20')}>
+            <button onClick={() => setShowChat(!showChat)} className={cn('rounded-full p-2.5 transition-all cursor-pointer', showChat ? 'bg-purple-600' : 'bg-white/10 hover:bg-white/20')}>
               <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" /></svg>
             </button>
           </div>
