@@ -1398,7 +1398,7 @@ function SuperAdminView() {
   )
 }
 
-// ==================== MAIN VIEW (Supabase matchmaking + PeerJS video/chat) ====================
+// ==================== MAIN VIEW (OmeTV-style + Supabase matchmaking + PeerJS video/chat) ====================
 function MainView() {
   const user = useDhobbytvStore((s) => s.user)
   const partner = useDhobbytvStore((s) => s.partner)
@@ -1428,10 +1428,13 @@ function MainView() {
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const [showCountrySelect, setShowCountrySelect] = useState(false)
   const [countrySearch, setCountrySearch] = useState('')
+  const [showHobbies, setShowHobbies] = useState(false)
   const matchedRef = useRef(false)
   const searchPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const onlinePollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const [showChat, setShowChat] = useState(false)
+  const [remoteMuted, setRemoteMuted] = useState(true)
 
   useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages])
 
@@ -1444,7 +1447,7 @@ function MainView() {
       const peerId = genPeerId(user!.username)
       setGlobalPeerId(peerId)
 
-      // 1. Register online IMMEDIATELY via Supabase (don't wait for PeerJS)
+      // 1. Register online IMMEDIATELY via Supabase
       console.log('[MAIN] Registering online:', peerId)
       try {
         const joinRes = await fetch('/api/online-count', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'join', peerId, username: user!.username, gender: user!.gender, isAdmin: false }) })
@@ -1483,12 +1486,40 @@ function MainView() {
         console.error('[MAIN] PeerJS error:', err.type, err.message)
       })
 
-      peer.on('call', (call) => {
-        if (!mounted || !globalStream) return
-        call.answer(globalStream)
+      // FIX: When receiving a call, get camera if not ready, then answer with stream
+      peer.on('call', async (call) => {
+        if (!mounted) return
+        console.log('[MAIN] Incoming call from:', call.peer)
+
+        // Get camera if we don't have a stream yet
+        if (!globalStream) {
+          try {
+            const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+            setGlobalStream(stream)
+            if (localVideoRef.current) localVideoRef.current.srcObject = stream
+          } catch (e) {
+            console.error('[MAIN] Could not get camera for incoming call:', e)
+            return
+          }
+        }
+
+        call.answer(globalStream!)
         mediaCallRef.current = call
-        call.on('stream', (remoteStream: MediaStream) => { if (remoteVideoRef.current && mounted) remoteVideoRef.current.srcObject = remoteStream })
+        call.on('stream', (remoteStream: MediaStream) => {
+          console.log('[MAIN] Got remote stream (incoming call)')
+          if (remoteVideoRef.current && mounted) {
+            remoteVideoRef.current.srcObject = remoteStream
+            // Auto-unmute remote audio on user interaction
+            const unmute = () => {
+              remoteVideoRef.current!.muted = false
+              setRemoteMuted(false)
+              document.removeEventListener('click', unmute)
+            }
+            document.addEventListener('click', unmute, { once: true })
+          }
+        })
         call.on('close', () => { if (mounted) handleNext() })
+        call.on('error', (err) => { console.error('[MAIN] Incoming call error:', err) })
       })
 
       peer.on('connection', (conn) => {
@@ -1578,7 +1609,6 @@ function MainView() {
           if (selectedCountry !== 'all' && c.countryCode !== selectedCountry && c.country !== selectedCountry) return false
           return true
         })
-        console.log('[MAIN] Poll: pool=' + (data.searching || []).length + ' candidates=' + candidates.length)
         if (candidates.length === 0) return
         const match = candidates[0]
         matchedRef.current = true
@@ -1590,11 +1620,22 @@ function MainView() {
         clearMessages()
         addMessage('Sistema', 'Conectado con ' + match.username + ' ' + getCountryFlag(match.countryCode) + ' ' + match.country)
         console.log('[MAIN] Match found! Calling:', match.peerId)
+
+        // Call the match with our stream
         const call = globalPeer!.call(match.peerId, globalStream!)
         mediaCallRef.current = call
-        call.on('stream', (remoteStream: MediaStream) => { if (remoteVideoRef.current) remoteVideoRef.current.srcObject = remoteStream })
+        call.on('stream', (remoteStream: MediaStream) => {
+          console.log('[MAIN] Got remote stream (outgoing call)')
+          if (remoteVideoRef.current) {
+            remoteVideoRef.current.srcObject = remoteStream
+            remoteVideoRef.current.muted = false
+            setRemoteMuted(false)
+          }
+        })
         call.on('close', () => { if (matchedRef.current) handleNext() })
         call.on('error', (err) => { console.error('[MAIN] Call error:', err); addMessage('Sistema', 'Error de conexion P2P. Intenta de nuevo.') })
+
+        // Data connection for chat
         const conn = globalPeer!.connect(match.peerId, { reliable: true })
         dataConnRef.current = conn
         conn.on('open', () => { conn.send(JSON.stringify({ type: 'partner-info', peerId: globalPeerId, username: user.username, gender: user.gender, country, countryCode })) })
@@ -1664,35 +1705,194 @@ function MainView() {
 
   const filteredCountries = COUNTRIES.filter((c) => c.code === 'all' || c.name.toLowerCase().includes(countrySearch.toLowerCase()))
 
+  // ==================== OmeTV-STYLE UI ====================
   return (
-    <div className="min-h-screen bg-gray-950 text-white flex flex-col">
-      {announcement && <div className="bg-yellow-600 text-white text-center py-2 text-sm shrink-0">{announcement}</div>}
-      <header className="border-b border-gray-800 px-4 py-3 shrink-0">
-        <div className="flex items-center justify-between max-w-6xl mx-auto">
-          <h1 className="text-xl font-black"><span className="text-purple-400">dhobby</span><span className="text-green-400">tv</span></h1>
-          <div className="flex items-center gap-3"><Badge variant="outline" className="text-green-400 border-green-400 text-xs">{onlineCount} online</Badge><span className="text-gray-400 text-sm hidden sm:inline">{getCountryFlag(countryCode)} {user?.username}</span><Button variant="ghost" size="sm" className="text-gray-400" onClick={handleLogout}>Salir</Button></div>
+    <div className="h-screen w-screen bg-black text-white flex flex-col overflow-hidden">
+      {/* Announcement banner */}
+      {announcement && <div className="bg-yellow-600 text-white text-center py-1.5 text-xs shrink-0 z-50">{announcement}</div>}
+
+      {/* STATE 1: Pre-search - Camera preview with controls (OmeTV home style) */}
+      {!partner && !isSearching && (
+        <div className="flex-1 flex flex-col relative">
+          {/* Top bar */}
+          <div className="absolute top-0 left-0 right-0 z-30 flex items-center justify-between px-3 py-2 bg-gradient-to-b from-black/80 to-transparent">
+            <h1 className="text-lg font-black"><span className="text-purple-400">dhobby</span><span className="text-green-400">tv</span></h1>
+            <div className="flex items-center gap-2">
+              <div className="flex items-center gap-1.5 bg-black/50 rounded-full px-3 py-1">
+                <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+                <span className="text-green-400 text-xs font-medium">{onlineCount} Users online</span>
+              </div>
+              <span className="text-gray-400 text-xs hidden sm:inline">{getCountryFlag(countryCode)} {user?.username}</span>
+              <button onClick={handleLogout} className="text-gray-400 hover:text-white text-xs ml-1">Salir</button>
+            </div>
+          </div>
+
+          {/* Camera preview (full screen background) */}
+          <video ref={localVideoRef} autoPlay playsInline muted style={{ transform: 'scaleX(-1)' }} className="absolute inset-0 w-full h-full object-cover" />
+          <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/30 to-black/60" />
+
+          {/* Rules warning */}
+          <div className="absolute top-14 left-0 right-0 flex justify-center z-20 px-4">
+            <div className="bg-black/60 backdrop-blur-sm rounded-lg px-3 py-2 max-w-lg text-center">
+              <p className="text-yellow-400 text-[10px] sm:text-xs">Al usar este videochat aceptas las reglas. Los violadores seran baneados. Manten tu rostro visible en la camara.</p>
+            </div>
+          </div>
+
+          {/* Center logo when no camera */}
+          <div className="flex-1 flex items-center justify-center z-10 pointer-events-none">
+            <div className="text-center">
+              <h2 className="text-4xl sm:text-5xl font-black mb-2"><span className="text-purple-400">dhobby</span><span className="text-green-400">tv</span></h2>
+              <p className="text-gray-300 text-sm">Conecta con personas al azar</p>
+            </div>
+          </div>
+
+          {/* Bottom controls (OmeTV style) */}
+          <div className="relative z-30 px-3 pb-4 space-y-3">
+            {/* Filter row */}
+            <div className="flex gap-2 justify-center">
+              <button onClick={() => setShowCountrySelect(!showCountrySelect)} className="flex items-center gap-2 bg-white/10 hover:bg-white/20 backdrop-blur-sm rounded-full px-4 py-2.5 text-sm transition-colors">
+                <span>Pais:</span>
+                <span className="font-medium">{getCountryFlag(selectedCountry)} {getCountryName(selectedCountry)}</span>
+                <svg className={cn('w-3 h-3', showCountrySelect && 'rotate-180')} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M19 9l-7 7-7-7" /></svg>
+              </button>
+              <button onClick={() => setShowHobbies(!showHobbies)} className={cn('flex items-center gap-2 rounded-full px-4 py-2.5 text-sm transition-colors', showHobbies ? 'bg-purple-600' : 'bg-white/10 hover:bg-white/20 backdrop-blur-sm')}>
+                <span>Intereses</span>
+                {hobbies.length > 0 && <span className="bg-white/20 rounded-full px-2 text-xs">{hobbies.length}</span>}
+              </button>
+            </div>
+
+            {/* Country dropdown */}
+            {showCountrySelect && (
+              <div className="bg-gray-900/95 backdrop-blur border border-gray-700 rounded-xl shadow-2xl max-h-60 overflow-hidden mx-auto max-w-sm">
+                <div className="p-2"><Input placeholder="Buscar pais..." value={countrySearch} onChange={(e) => setCountrySearch(e.target.value)} className="bg-gray-800 border-gray-600 text-sm h-8" autoFocus /></div>
+                <ScrollArea className="max-h-44">{filteredCountries.map((c) => (<button key={c.code} onClick={() => { setSelectedCountry(c.code); setShowCountrySelect(false); setCountrySearch('') }} className={cn('w-full text-left px-4 py-2 text-sm hover:bg-gray-700 transition-colors flex items-center gap-2', selectedCountry === c.code ? 'bg-purple-600/30 text-purple-300' : 'text-gray-300')}>{c.flag} {c.name}</button>))}</ScrollArea>
+              </div>
+            )}
+
+            {/* Hobbies panel */}
+            {showHobbies && (
+              <div className="bg-gray-900/95 backdrop-blur border border-gray-700 rounded-xl shadow-2xl p-3 mx-auto max-w-sm">
+                <div className="flex flex-wrap gap-1.5">{HOBBIES.map((h) => (<button key={h.id} onClick={() => toggleHobby(h.id)} className={cn('px-2.5 py-1 rounded-full text-xs border transition-all', hobbies.includes(h.id) ? 'bg-purple-600 border-purple-500 text-white' : 'bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-500')}>{h.icon} {h.label}</button>))}</div>
+              </div>
+            )}
+
+            {/* Start button (OmeTV green) */}
+            <div className="flex justify-center">
+              <button onClick={handleSearch} className="bg-green-500 hover:bg-green-600 active:scale-95 text-white font-bold px-16 py-4 text-lg rounded-full shadow-lg shadow-green-500/30 transition-all">
+                Iniciar
+              </button>
+            </div>
+          </div>
         </div>
-      </header>
-      <main className="flex-1 flex flex-col max-w-6xl mx-auto w-full p-4">
-        {!partner && !isSearching && (
-          <div className="flex-1 flex flex-col items-center justify-center gap-6">
-            <div className="text-center"><h2 className="text-3xl font-bold mb-2">{getGenderShort(user?.gender || '')} Hola, {user?.username}</h2><p className="text-gray-400">Selecciona tus preferencias y busca alguien</p></div>
-            <Card className="w-full max-w-md bg-gray-900 border-gray-800"><CardContent className="p-4"><p className="text-sm text-gray-400 mb-3">Filtrar por pais:</p><div className="relative"><button onClick={() => setShowCountrySelect(!showCountrySelect)} className="w-full flex items-center justify-between p-3 bg-gray-800 rounded-lg border border-gray-700 hover:border-gray-500 transition-colors"><span className="flex items-center gap-2">{getCountryFlag(selectedCountry)} {getCountryName(selectedCountry)}</span><svg className={cn('w-4 h-4 transition-transform', showCountrySelect ? 'rotate-180' : '')} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg></button>{showCountrySelect && (<div className="absolute z-50 mt-1 w-full bg-gray-800 border border-gray-700 rounded-lg shadow-xl max-h-60 overflow-hidden"><div className="p-2"><Input placeholder="Buscar pais..." value={countrySearch} onChange={(e) => setCountrySearch(e.target.value)} className="bg-gray-700 border-gray-600 text-sm" autoFocus /></div><ScrollArea className="max-h-48">{filteredCountries.map((c) => (<button key={c.code} onClick={() => { setSelectedCountry(c.code); setShowCountrySelect(false); setCountrySearch('') }} className={cn('w-full text-left px-4 py-2 text-sm hover:bg-gray-700 transition-colors flex items-center gap-2', selectedCountry === c.code ? 'bg-purple-600/20 text-purple-300' : 'text-gray-300')}>{c.flag} {c.name}</button>))}</ScrollArea></div>)}</div></CardContent></Card>
-            <Card className="w-full max-w-md bg-gray-900 border-gray-800"><CardContent className="p-4"><p className="text-sm text-gray-400 mb-3">Tus intereses (opcional):</p><div className="flex flex-wrap gap-2">{HOBBIES.map((h) => (<button key={h.id} onClick={() => toggleHobby(h.id)} className={cn('px-3 py-1.5 rounded-full text-sm border transition-all', hobbies.includes(h.id) ? 'bg-purple-600 border-purple-500 text-white' : 'bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-500')}>{h.icon} {h.label}</button>))}</div></CardContent></Card>
-            <Button onClick={handleSearch} className="bg-green-600 hover:bg-green-700 text-white font-bold px-12 py-7 text-xl rounded-2xl">Buscar Persona</Button>
+      )}
+
+      {/* STATE 2: Searching - Own camera with spinner overlay */}
+      {isSearching && !partner && (
+        <div className="flex-1 flex flex-col relative">
+          <div className="absolute top-0 left-0 right-0 z-30 flex items-center justify-between px-3 py-2 bg-gradient-to-b from-black/80 to-transparent">
+            <h1 className="text-lg font-black"><span className="text-purple-400">dhobby</span><span className="text-green-400">tv</span></h1>
+            <div className="flex items-center gap-2">
+              <div className="flex items-center gap-1.5 bg-black/50 rounded-full px-3 py-1">
+                <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+                <span className="text-green-400 text-xs font-medium">{onlineCount} online</span>
+              </div>
+            </div>
           </div>
-        )}
-        {isSearching && !partner && (<div className="flex-1 flex flex-col items-center justify-center gap-4"><div className="w-16 h-16 border-4 border-purple-500 border-t-transparent rounded-full animate-spin" /><p className="text-gray-400 text-lg">Buscando persona...</p><Button variant="outline" className="text-gray-400" onClick={handleNext}>Cancelar</Button></div>)}
-        {partner && (
-          <div className="flex-1 flex flex-col gap-3">
-            <div className="flex items-center justify-between bg-gray-900 rounded-lg px-4 py-2"><div className="flex items-center gap-2"><span>{getGenderShort(partner.gender)}</span><span className="font-medium">{partner.username}</span><span className="text-gray-400">{getCountryFlag(partner.countryCode)} {partner.country}</span></div></div>
-            <div className="relative rounded-xl overflow-hidden bg-black flex-1 min-h-0"><video ref={remoteVideoRef} autoPlay playsInline className="w-full h-full object-cover" /><div className="absolute bottom-3 right-3 w-32 h-24 sm:w-40 sm:h-30 rounded-lg overflow-hidden border-2 border-purple-500 shadow-lg"><video ref={localVideoRef} autoPlay playsInline muted style={{ transform: 'scaleX(-1)' }} className="w-full h-full object-cover" /></div></div>
-            <div className="bg-gray-900 rounded-lg h-32 overflow-y-auto p-3 space-y-1">{messages.map((msg, i) => (<p key={i} className={cn('text-sm', msg.from === 'Sistema' ? 'text-purple-400 italic' : msg.from === user?.username ? 'text-green-400' : 'text-gray-300')}><span className="font-medium">{msg.from}:</span> {msg.text}</p>))}<div ref={messagesEndRef} /></div>
-            <div className="flex gap-2"><Input placeholder="Escribe un mensaje..." value={chatInput} onChange={(e) => setChatInput(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()} className="bg-gray-800 border-gray-700 text-white flex-1" /><Button onClick={handleSendMessage} className="bg-purple-600 hover:bg-purple-700">Enviar</Button></div>
-            <div className="flex gap-2"><Button onClick={handleNext} className="flex-1 bg-blue-600 hover:bg-blue-700">Siguiente</Button><Button variant="outline" className="flex-1 border-red-600 text-red-400 hover:bg-red-600 hover:text-white" onClick={() => setShowReport(true)}>Reportar</Button></div>
+
+          {/* Own camera full screen */}
+          <video ref={localVideoRef} autoPlay playsInline muted style={{ transform: 'scaleX(-1)' }} className="absolute inset-0 w-full h-full object-cover" />
+          <div className="absolute inset-0 bg-black/40" />
+
+          {/* Searching indicator */}
+          <div className="flex-1 flex flex-col items-center justify-center z-10 gap-4">
+            <div className="w-16 h-16 border-4 border-purple-500 border-t-transparent rounded-full animate-spin" />
+            <p className="text-white text-lg font-medium">Buscando persona...</p>
+            <p className="text-gray-400 text-sm">Filtro: {getCountryFlag(selectedCountry)} {getCountryName(selectedCountry)}</p>
           </div>
-        )}
-      </main>
+
+          {/* Cancel button */}
+          <div className="relative z-30 flex justify-center pb-6">
+            <button onClick={handleNext} className="bg-red-500/80 hover:bg-red-500 text-white font-bold px-10 py-3.5 rounded-full shadow-lg transition-all">
+              Detener
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* STATE 3: Connected - Split screen video call (OmeTV style) */}
+      {partner && (
+        <div className="flex-1 flex flex-col relative">
+          {/* Top bar */}
+          <div className="absolute top-0 left-0 right-0 z-30 flex items-center justify-between px-3 py-2 bg-gradient-to-b from-black/80 to-transparent">
+            <div className="flex items-center gap-2">
+              <h1 className="text-sm font-black"><span className="text-purple-400">dhobby</span><span className="text-green-400">tv</span></h1>
+              <div className="bg-black/50 rounded-full px-2.5 py-1 flex items-center gap-1.5">
+                <div className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
+                <span className="text-green-400 text-[10px] font-medium">{onlineCount} online</span>
+              </div>
+            </div>
+            <div className="flex items-center gap-1.5 bg-black/50 rounded-full px-3 py-1">
+              <span>{getGenderShort(partner.gender)}</span>
+              <span className="text-white text-xs font-medium">{partner.username}</span>
+              <span className="text-gray-400 text-xs">{getCountryFlag(partner.countryCode)} {partner.country}</span>
+            </div>
+          </div>
+
+          {/* Video area: split screen on desktop, full remote + PiP on mobile */}
+          <div className="flex-1 flex relative min-h-0">
+            {/* Remote video (stranger) - full background */}
+            <video ref={remoteVideoRef} autoPlay playsInline className="absolute inset-0 w-full h-full object-cover bg-gray-900" />
+            {remoteMuted && (
+              <button onClick={() => { if (remoteVideoRef.current) { remoteVideoRef.current.muted = false; setRemoteMuted(false) } }} className="absolute top-16 left-1/2 -translate-x-1/2 z-40 bg-red-600 hover:bg-red-700 text-white rounded-full px-4 py-2 text-sm font-medium shadow-lg flex items-center gap-2 animate-pulse">
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.536 8.464a5 5 0 010 7.072M12 6.253v11.494M17.657 6.343a8 8 0 010 11.314M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" /></svg>
+                Clic para escuchar
+              </button>
+            )}
+
+            {/* Local video (PiP) */}
+            <div className="absolute bottom-24 sm:bottom-20 right-3 w-28 h-20 sm:w-36 sm:h-28 rounded-xl overflow-hidden border-2 border-purple-500 shadow-xl z-20">
+              <video ref={localVideoRef} autoPlay playsInline muted style={{ transform: 'scaleX(-1)' }} className="w-full h-full object-cover" />
+            </div>
+
+            {/* Chat panel (toggle) */}
+            {showChat && (
+              <div className="absolute bottom-20 left-3 right-3 sm:left-auto sm:right-48 sm:w-80 z-20 bg-black/80 backdrop-blur-md rounded-xl border border-gray-700 flex flex-col max-h-56">
+                <div className="px-3 py-2 border-b border-gray-700 flex items-center justify-between">
+                  <span className="text-xs text-gray-400 font-medium">Chat</span>
+                  <button onClick={() => setShowChat(false)} className="text-gray-400 hover:text-white text-xs">Cerrar</button>
+                </div>
+                <div className="flex-1 overflow-y-auto p-2 space-y-1 min-h-0">
+                  {messages.map((msg, i) => (
+                    <p key={i} className={cn('text-xs', msg.from === 'Sistema' ? 'text-purple-400 italic' : msg.from === user?.username ? 'text-green-400' : 'text-gray-300')}>
+                      <span className="font-medium">{msg.from}:</span> {msg.text}
+                    </p>
+                  ))}
+                  <div ref={messagesEndRef} />
+                </div>
+                <div className="p-2 border-t border-gray-700 flex gap-1.5">
+                  <input placeholder="Mensaje..." value={chatInput} onChange={(e) => setChatInput(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()} className="flex-1 bg-gray-800 border-gray-600 rounded-lg px-2.5 py-1.5 text-xs text-white outline-none focus:border-purple-500" />
+                  <button onClick={handleSendMessage} className="bg-purple-600 hover:bg-purple-700 rounded-lg px-3 py-1.5 text-xs font-medium">Enviar</button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Bottom controls (OmeTV style buttons) */}
+          <div className="relative z-30 flex items-center justify-center gap-2 px-3 py-3 bg-black/60 backdrop-blur-sm">
+            <button onClick={handleNext} className="bg-green-500 hover:bg-green-600 active:scale-95 text-white font-bold px-6 sm:px-8 py-2.5 sm:py-3 rounded-full text-sm sm:text-base shadow-lg shadow-green-500/30 transition-all">
+              Siguiente
+            </button>
+            <button onClick={() => setShowReport(true)} className="bg-red-500/80 hover:bg-red-500 active:scale-95 text-white font-bold px-6 sm:px-8 py-2.5 sm:py-3 rounded-full text-sm sm:text-base shadow-lg transition-all">
+              Parar
+            </button>
+            <button onClick={() => setShowChat(!showChat)} className={cn('rounded-full p-2.5 transition-all', showChat ? 'bg-purple-600' : 'bg-white/10 hover:bg-white/20')}>
+              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" /></svg>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Report dialog */}
       <Dialog open={showReport} onOpenChange={setShowReport}><DialogContent className="bg-gray-900 border-gray-700 text-white"><DialogHeader><DialogTitle>Reportar a {partner?.username}</DialogTitle></DialogHeader><Input placeholder="Razon" value={reportReason} onChange={(e) => setReportReason(e.target.value)} className="bg-gray-800 border-gray-600" /><div className="flex gap-3"><Button variant="outline" className="flex-1" onClick={() => setShowReport(false)}>Cancelar</Button><Button className="flex-1 bg-red-600 hover:bg-red-700" onClick={handleReport}>Reportar</Button></div></DialogContent></Dialog>
     </div>
   )
