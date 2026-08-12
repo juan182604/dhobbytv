@@ -184,6 +184,24 @@ function RegisterView() {
 function VerificationPendingView() {
   const user = useDhobbytvStore((s) => s.user)
   const setView = useDhobbytvStore((s) => s.setView)
+  const setUser = useDhobbytvStore((s) => s.setUser)
+
+  // Polling: verificar si el admin ya acepto al usuario desde pendientes
+  useEffect(() => {
+    if (!user?.username) return
+    const poll = setInterval(async () => {
+      try {
+        const res = await fetch(`/api/check-verified?username=${encodeURIComponent(user.username)}`)
+        const data = await res.json()
+        if (data.verified && user) {
+          setUser({ ...user, verified: true })
+          toast.success('Has sido verificado! Ya puedes usar dhobbytv.')
+          setTimeout(() => setView('main'), 1000)
+        }
+      } catch {}
+    }, 5000)
+    return () => clearInterval(poll)
+  }, [user?.username])
 
   const startVerification = async () => {
     setView('verification')
@@ -813,19 +831,22 @@ function AdminView() {
   const [pendingUsers, setPendingUsers] = useState<any[]>(cachedAdminData?.pendingUsers || [])
   const [reportedUsers, setReportedUsers] = useState<any[]>(cachedAdminData?.reportedUsers || [])
   const [videoQueue, setVideoQueue] = useState<any[]>(cachedAdminData?.videoQueue || [])
+  const [verifiedUsers, setVerifiedUsers] = useState<any[]>([])
   const [onlineCount, setOnlineCount] = useState(0)
   const [peerReady, setPeerReady] = useState(false)
 
   const loadAdminData = async () => {
     try {
-      const [pendingRes, reportedRes, queueRes] = await Promise.all([
+      const [pendingRes, reportedRes, queueRes, verifiedRes] = await Promise.all([
         fetch('/api/pending-users').then((r) => r.json()),
         fetch('/api/reported-users').then((r) => r.json()).catch(() => ({ users: [] })),
         fetch('/api/verify-queue').then((r) => r.json()),
+        fetch('/api/verified-users').then((r) => r.json()).catch(() => ({ users: [] })),
       ])
       if (pendingRes.users) { setPendingUsers(pendingRes.users); cachedAdminData = { ...cachedAdminData, pendingUsers: pendingRes.users } }
       if (reportedRes.users) { setReportedUsers(reportedRes.users); cachedAdminData = { ...cachedAdminData, reportedUsers: reportedRes.users } }
       if (queueRes.queue) { setVideoQueue(queueRes.queue); cachedAdminData = { ...cachedAdminData, videoQueue: queueRes.queue } }
+      if (verifiedRes.users) { setVerifiedUsers(verifiedRes.users) }
     } catch {}
   }
 
@@ -943,6 +964,7 @@ function AdminView() {
         <Tabs defaultValue="pending">
           <TabsList className="bg-gray-900 mb-4">
             <TabsTrigger value="pending" className="data-[state=active]:bg-purple-600">Pendientes ({pendingUsers.length})</TabsTrigger>
+            <TabsTrigger value="verified" className="data-[state=active]:bg-green-600">Verificados ({verifiedUsers.length})</TabsTrigger>
             <TabsTrigger value="video-queue" className="data-[state=active]:bg-purple-600">Video Queue ({videoQueue.length})</TabsTrigger>
             <TabsTrigger value="reported" className="data-[state=active]:bg-purple-600">Reportados ({reportedUsers.length})</TabsTrigger>
           </TabsList>
@@ -958,6 +980,21 @@ function AdminView() {
                   </div>
                 )})}
                 {pendingUsers.length === 0 && <p className="text-gray-500 text-center py-4">No hay pendientes</p>}
+              </div></ScrollArea></CardContent>
+            </Card>
+          </TabsContent>
+
+          <TabsContent value="verified">
+            <Card className="bg-gray-900 border-gray-800">
+              <CardHeader><CardTitle className="text-lg">Usuarios Verificados ({verifiedUsers.length})</CardTitle><CardDescription className="text-gray-400">Usuarios que han pasado la verificacion</CardDescription></CardHeader>
+              <CardContent><ScrollArea className="max-h-[600px]"><div className="space-y-2">
+                {verifiedUsers.map((u: any) => { const mA = Math.floor((Date.now() - new Date(u.createdAt).getTime()) / 60000); return (
+                  <div key={u.id} className="flex items-center justify-between p-3 rounded-lg border bg-gray-800 border-gray-700">
+                    <div className="flex items-center gap-3"><span className="text-lg">{getGenderShort(u.gender)}</span><div><div className="flex items-center gap-2"><p className="font-medium text-sm">{u.username}</p><Badge className="bg-green-700 text-xs">VERIFICADO</Badge></div><p className="text-xs text-gray-500">{new Date(u.createdAt).toLocaleString()} ({mA < 60 ? `${mA}m` : `${Math.floor(mA / 60)}h`})</p></div></div>
+                    <Button size="sm" className="bg-red-600 hover:bg-red-700 text-xs" onClick={() => setBanDialog({ userId: u.id, username: u.username })}>Banear</Button>
+                  </div>
+                )})}
+                {verifiedUsers.length === 0 && <p className="text-gray-500 text-center py-4">No hay verificados</p>}
               </div></ScrollArea></CardContent>
             </Card>
           </TabsContent>

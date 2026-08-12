@@ -6,9 +6,12 @@ import Peer, { DataConnection, MediaConnection } from 'peerjs'
 
 // Gun relay URL - el usuario despliega un relay gratuito en Render
 export const GUN_RELAY = process.env.NEXT_PUBLIC_GUN_RELAY || ''
-// Public fallback relays (para cuando el propio este dormido)
+// Public fallback relays (reemplazar con relays activos)
 const PUBLIC_RELAYS = [
   'https://gun-manhattan.herokuapp.com/gun',
+  'https://peer.wallie.io/gun',
+  'https://gundb-relay-mlccl.ondigitalocean.app/gun',
+  'https://gun-ams.pndo.xyz/gun',
 ]
 
 // ==================== GUN.JS ====================
