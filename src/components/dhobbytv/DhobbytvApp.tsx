@@ -195,17 +195,24 @@ function VerificationPendingView() {
   // Polling: verificar si el admin ya acepto al usuario desde pendientes
   useEffect(() => {
     if (!user?.username) return
+    let pollCount = 0
     const poll = setInterval(async () => {
+      pollCount++
       try {
         const res = await fetch('/api/check-verified?username=' + encodeURIComponent(user.username))
+        if (!res.ok) { console.warn('[VERIFY-PENDING] check-verified HTTP error:', res.status); return }
         const data = await res.json()
+        console.log('[VERIFY-PENDING] Poll #' + pollCount + ':', data.verified)
         if (data.verified && user) {
+          clearInterval(poll)
           setUser({ ...user, verified: true })
           toast.success('Has sido verificado! Ya puedes usar dhobbytv.')
           setTimeout(() => setView('main'), 1000)
         }
-      } catch {}
-    }, 5000)
+      } catch (err) {
+        console.warn('[VERIFY-PENDING] Poll error:', err)
+      }
+    }, 3000) // 3s en vez de 5s para mas rapidez
     return () => clearInterval(poll)
   }, [user?.username])
 
@@ -508,6 +515,7 @@ function AdminVerificationView() {
   const [userAudioReady, setUserAudioReady] = useState(false)
   const [chatInput, setChatInput] = useState('')
   const [statusMsg, setStatusMsg] = useState('Conectando con usuario...')
+  const [adminAudioUnmuted, setAdminAudioUnmuted] = useState(false)
 
   const remoteVideoRef = useRef<HTMLVideoElement>(null)
   const localVideoRef = useRef<HTMLVideoElement>(null)
@@ -586,7 +594,12 @@ function AdminVerificationView() {
           }
           if (remoteVideoRef.current && mounted) {
             remoteVideoRef.current.srcObject = remoteStream
-            remoteVideoRef.current.play().catch((e: any) => console.warn('[ADMIN-VERIFY] Autoplay blocked:', e))
+            // Empezar muted para que Chrome permita autoplay, luego desmutear con click
+            remoteVideoRef.current.muted = true
+            remoteVideoRef.current.play().then(() => {
+              // Autoplay exitoso, el admin necesita hacer click para escuchar
+              console.log('[ADMIN-VERIFY] Video autoplay OK (muted)')
+            }).catch((e: any) => console.warn('[ADMIN-VERIFY] Autoplay blocked:', e))
             const ph = document.getElementById('admin-remote-video-placeholder')
             if (ph) ph.style.opacity = '0'
             setStatusMsg('Video conectado con ' + verificationTarget.username + '. Revisa su documento.')
@@ -766,6 +779,7 @@ function AdminVerificationView() {
     adminStreamRef.current = null
     dataConnRef.current = null
     mediaCallRef.current = null
+    setAdminAudioUnmuted(false)
     useDhobbytvStore.getState().setVerificationTarget(null)
     useDhobbytvStore.getState().clearVerificationMessages()
     useDhobbytvStore.getState().setView('admin')
@@ -800,7 +814,13 @@ function AdminVerificationView() {
             </div>
           </div>
           <div className="relative rounded-xl overflow-hidden bg-black flex-1 min-h-0">
-            <video ref={remoteVideoRef} autoPlay playsInline style={{ transform: 'scaleX(-1)' }} className="absolute inset-0 w-full h-full object-cover" />
+            <video ref={remoteVideoRef} autoPlay playsInline muted style={{ transform: 'scaleX(-1)' }} className="absolute inset-0 w-full h-full object-cover" />
+            {!adminAudioUnmuted && userAudioReady && (
+              <button onClick={() => { if (remoteVideoRef.current) { remoteVideoRef.current.muted = false; setAdminAudioUnmuted(true) } }} className="absolute top-3 left-1/2 -translate-x-1/2 z-10 bg-red-600/90 hover:bg-red-500 text-white text-sm px-4 py-2 rounded-full font-medium flex items-center gap-2 transition-colors cursor-pointer">
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.536 8.464a5 5 0 010 7.072M12 6v12M6.343 6.343a8 8 0 000 11.314M9.172 9.172a4 4 0 000 5.656" /></svg>
+                Clic para escuchar audio
+              </button>
+            )}
             <div id="admin-remote-video-placeholder" className="absolute inset-0 flex items-center justify-center pointer-events-none transition-opacity duration-500">
               <div className="text-center">
                 <div className="w-8 h-8 border-2 border-green-400 border-t-transparent rounded-full animate-spin mx-auto mb-2" />
