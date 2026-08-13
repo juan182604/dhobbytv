@@ -56,6 +56,7 @@ export async function GET() {
         countryCode: info.countryCode || '',
         hobbies: info.hobbies || [],
         countryFilter: info.countryFilter || 'all',
+        nickname: info.nickname || '',
         timestamp: new Date(d.createdAt).getTime(),
       }
     }).filter((d: any) => d.peerId)
@@ -72,7 +73,7 @@ export async function POST(request: Request) {
   try {
     const supabase = getSupabaseClient()
     const body = await request.json()
-    const { action, peerId, username, gender, country, countryCode, hobbies, countryFilter } = body
+    const { action, peerId, username, gender, country, countryCode, hobbies, countryFilter, nickname } = body
 
     if (action === 'join' && peerId && username) {
       const id = toId(peerId)
@@ -85,7 +86,8 @@ export async function POST(request: Request) {
       const matchData = JSON.stringify({
         username, gender: gender || '', country: country || '',
         countryCode: countryCode || '', hobbies: hobbies || [],
-        countryFilter: countryFilter || 'all'
+        countryFilter: countryFilter || 'all',
+        nickname: nickname || ''
       })
 
       const { data, error } = await supabase

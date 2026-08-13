@@ -18,6 +18,7 @@ interface PartnerInfo {
   gender: string
   country: string
   countryCode: string
+  nickname?: string
 }
 
 interface VerificationTarget {
@@ -47,6 +48,7 @@ interface DhobbytvState {
   verificationMessages: Array<{ from: string; text: string; time: string }>
   messages: Array<{ from: string; text: string; time: string }>
   announcement: string | null
+  nickname: string
 
   setView: (view: AppView) => void
   setUser: (user: UserInfo | null) => void
@@ -64,6 +66,7 @@ interface DhobbytvState {
   clearMessages: () => void
   clearVerificationMessages: () => void
   setAnnouncement: (text: string | null) => void
+  setNickname: (n: string) => void
   reset: () => void
 }
 
@@ -83,6 +86,7 @@ const initialState = {
   verificationMessages: [] as Array<{ from: string; text: string; time: string }>,
   messages: [],
   announcement: null as string | null,
+  nickname: '' as string,
 }
 
 export const useDhobbytvStore = create<DhobbytvState>()(
@@ -116,6 +120,7 @@ export const useDhobbytvStore = create<DhobbytvState>()(
   clearMessages: () => set({ messages: [] }),
   clearVerificationMessages: () => set({ verificationMessages: [] }),
   setAnnouncement: (text) => set({ announcement: text }),
+  setNickname: (n) => set({ nickname: n }),
   reset: () => set(initialState),
 }),
     {
@@ -128,6 +133,7 @@ export const useDhobbytvStore = create<DhobbytvState>()(
           : state.view,
         country: state.country,
         countryCode: state.countryCode,
+        nickname: state.nickname,
       }),
     }
   )

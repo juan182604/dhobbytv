@@ -9,10 +9,12 @@ const PREFIX = 'ol_'
 
 function toId(peerId: string) { return PREFIX + peerId }
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
     const supabase = getSupabaseClient()
     const cutoff = new Date(Date.now() - ONLINE_EXPIRE_MS).toISOString()
+    const { searchParams } = new URL(request.url)
+    const returnList = searchParams.get('list') === 'true'
 
     // Limpiar offline
     try {
@@ -24,6 +26,37 @@ export async function GET() {
       if (delErr) console.error('[ONLINE-COUNT] Cleanup error:', delErr.message)
     } catch (e) {
       console.error('[ONLINE-COUNT] Cleanup exception:', e)
+    }
+
+    if (returnList) {
+      // Return full list of online users
+      const { data, error } = await supabase
+        .from('announcement')
+        .select('id, text, createdAt')
+        .like('id', PREFIX + '%')
+        .eq('active', true)
+        .gte('createdAt', cutoff)
+
+      if (error) {
+        console.error('[ONLINE-COUNT] List error:', error.message)
+        return NextResponse.json({ users: [] }, { status: 500 })
+      }
+
+      const users = (data || []).map((d: any) => {
+        const peerId = d.id.startsWith(PREFIX) ? d.id.slice(PREFIX.length) : null
+        const info = typeof d.text === 'string' ? (() => { try { return JSON.parse(d.text) } catch { return {} } })() : (d.text || {})
+        return {
+          peerId,
+          username: info.username || '',
+          gender: info.gender || '',
+          isAdmin: !!info.isAdmin,
+          nickname: info.nickname || '',
+          country: info.country || '',
+          countryCode: info.countryCode || '',
+        }
+      }).filter((u: any) => u.peerId)
+
+      return NextResponse.json({ users })
     }
 
     // Contar online
@@ -51,11 +84,11 @@ export async function POST(request: Request) {
   try {
     const supabase = getSupabaseClient()
     const body = await request.json()
-    const { action, peerId, username, gender, isAdmin } = body
+    const { action, peerId, username, gender, isAdmin, country, countryCode, nickname } = body
 
     if (action === 'join' && peerId && username) {
       const id = toId(peerId)
-      const info = JSON.stringify({ username, gender: gender || '', isAdmin: !!isAdmin })
+      const info = JSON.stringify({ username, gender: gender || '', isAdmin: !!isAdmin, country: country || '', countryCode: countryCode || '', nickname: nickname || '' })
 
       // Primero intentar borrar si existe (limpieza)
       try {
