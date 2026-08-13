@@ -1658,7 +1658,7 @@ function MainView() {
             call.answer(globalStream)
           } else {
             try {
-              const stream = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 1920 }, height: { ideal: 1080 }, facingMode: 'user' }, audio: true })
+              const stream = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 3840, max: 3840 }, height: { ideal: 2160, max: 2160 }, facingMode: 'user' }, audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } })
               setGlobalStream(stream)
               if (localVideoRef.current) localVideoRef.current.srcObject = stream
               call.answer(stream)
@@ -1682,7 +1682,7 @@ function MainView() {
         // Get camera if we don't have a stream yet
         if (!globalStream) {
           try {
-            const stream = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 1920 }, height: { ideal: 1080 }, facingMode: 'user' }, audio: true })
+            const stream = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 3840, max: 3840 }, height: { ideal: 2160, max: 2160 }, facingMode: 'user' }, audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } })
             setGlobalStream(stream)
             if (localVideoRef.current) localVideoRef.current.srcObject = stream
           } catch (e) {
@@ -1779,7 +1779,7 @@ function MainView() {
     // Only get camera if we don't already have a stream
     if (!globalStream) {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 1920 }, height: { ideal: 1080 }, facingMode: 'user' }, audio: true })
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 3840, max: 3840 }, height: { ideal: 2160, max: 2160 }, facingMode: 'user' }, audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } })
         setGlobalStream(stream)
         if (localVideoRef.current) localVideoRef.current.srcObject = stream
       } catch {
@@ -2005,15 +2005,27 @@ function MainView() {
           <div className="absolute top-0 left-0 right-0 z-30 flex items-center justify-between px-3 py-2 bg-gradient-to-b from-black/80 to-transparent">
             <h1 className="text-lg font-black"><span className="text-purple-400">dhobby</span><span className="text-green-400">tv</span></h1>
             <div className="flex items-center gap-2">
+              <div className="relative">
+                <button onClick={() => setShowCountrySelect(!showCountrySelect)} className="rounded-full p-2 bg-white/10 hover:bg-white/20 transition-all cursor-pointer" title="Cambiar pais">
+                  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                </button>
+                {showCountrySelect && (
+                  <div className="absolute right-0 top-full mt-2 bg-gray-900/95 backdrop-blur border border-gray-700 rounded-xl shadow-2xl w-72 overflow-hidden z-50">
+                    <div className="p-2"><Input placeholder="Buscar pais..." value={countrySearch} onChange={(e) => setCountrySearch(e.target.value)} className="bg-gray-800 border-gray-600 text-sm h-8" autoFocus /></div>
+                    <ScrollArea className="max-h-44">{filteredCountries.map((c) => (<button key={c.code} onClick={() => { setSelectedCountry(c.code); setShowCountrySelect(false); setCountrySearch('') }} className={cn('w-full text-left px-4 py-2 text-sm hover:bg-gray-700 transition-colors flex items-center gap-2', selectedCountry === c.code ? 'bg-purple-600/30 text-purple-300' : 'text-gray-300')}>{c.flag} {c.name}</button>))}</ScrollArea>
+                  </div>
+                )}
+              </div>
+              <span className="text-xs font-medium px-2.5 py-1 rounded-full bg-white/10">{getCountryFlag(selectedCountry)} {getCountryName(selectedCountry)}</span>
               {displayNickname}
               <button onClick={() => { setNicknameInput(nickname); setEditingNickname(true) }} className="text-gray-400 hover:text-white cursor-pointer"><svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" /></svg></button>
-              <button onClick={handleLogout} className="text-gray-400 hover:text-white text-xs ml-1">Salir</button>
+              <button onClick={handleLogout} className="text-gray-400 hover:text-white text-xs ml-1 cursor-pointer">Salir</button>
             </div>
           </div>
 
           {/* Camera preview (full screen background) - zoom out effect */}
           <div className="absolute inset-0 overflow-hidden">
-            <video ref={localVideoRef} autoPlay playsInline muted style={{ transform: 'scaleX(-1)' }} className="w-[130%] h-[130%] object-cover" />
+            <video ref={localVideoRef} autoPlay playsInline muted style={{ transform: 'scaleX(-1)' }} className="w-[160%] h-[160%] object-cover" />
           </div>
           <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/30 to-black/60" />
 
@@ -2033,27 +2045,10 @@ function MainView() {
           </div>
 
           {/* Bottom controls (OmeTV style) */}
-          <div className="relative z-30 px-3 pb-4 space-y-3">
-            {/* Filter row */}
-            <div className="flex gap-2 justify-center">
-              <button onClick={() => setShowCountrySelect(!showCountrySelect)} className="flex items-center gap-2 bg-white/10 hover:bg-white/20 backdrop-blur-sm rounded-full px-4 py-2.5 text-sm transition-colors">
-                <span>Pais:</span>
-                <span className="font-medium">{getCountryFlag(selectedCountry)} {getCountryName(selectedCountry)}</span>
-                <svg className={cn('w-3 h-3', showCountrySelect && 'rotate-180')} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M19 9l-7 7-7-7" /></svg>
-              </button>
-            </div>
-
-            {/* Country dropdown */}
-            {showCountrySelect && (
-              <div className="bg-gray-900/95 backdrop-blur border border-gray-700 rounded-xl shadow-2xl max-h-60 overflow-hidden mx-auto max-w-sm">
-                <div className="p-2"><Input placeholder="Buscar pais..." value={countrySearch} onChange={(e) => setCountrySearch(e.target.value)} className="bg-gray-800 border-gray-600 text-sm h-8" autoFocus /></div>
-                <ScrollArea className="max-h-44">{filteredCountries.map((c) => (<button key={c.code} onClick={() => { setSelectedCountry(c.code); setShowCountrySelect(false); setCountrySearch('') }} className={cn('w-full text-left px-4 py-2 text-sm hover:bg-gray-700 transition-colors flex items-center gap-2', selectedCountry === c.code ? 'bg-purple-600/30 text-purple-300' : 'text-gray-300')}>{c.flag} {c.name}</button>))}</ScrollArea>
-              </div>
-            )}
-
+          <div className="relative z-30 px-3 pb-4">
             {/* Start button (OmeTV green) */}
             <div className="flex justify-center">
-              <button onClick={handleSearch} className="bg-green-500 hover:bg-green-600 active:scale-95 text-white font-bold px-16 py-4 text-lg rounded-full shadow-lg shadow-green-500/30 transition-all">
+              <button onClick={handleSearch} className="bg-green-500 hover:bg-green-600 active:scale-95 text-white font-bold px-16 py-4 text-lg rounded-full shadow-lg shadow-green-500/30 transition-all cursor-pointer">
                 Iniciar
               </button>
             </div>
@@ -2067,13 +2062,25 @@ function MainView() {
           <div className="absolute top-0 left-0 right-0 z-30 flex items-center justify-between px-3 py-2 bg-gradient-to-b from-black/80 to-transparent">
             <h1 className="text-lg font-black"><span className="text-purple-400">dhobby</span><span className="text-green-400">tv</span></h1>
             <div className="flex items-center gap-2">
+              <div className="relative">
+                <button onClick={() => setShowCountrySelect(!showCountrySelect)} className="rounded-full p-2 bg-white/10 hover:bg-white/20 transition-all cursor-pointer" title="Cambiar pais">
+                  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                </button>
+                {showCountrySelect && (
+                  <div className="absolute right-0 top-full mt-2 bg-gray-900/95 backdrop-blur border border-gray-700 rounded-xl shadow-2xl w-72 overflow-hidden z-50">
+                    <div className="p-2"><Input placeholder="Buscar pais..." value={countrySearch} onChange={(e) => setCountrySearch(e.target.value)} className="bg-gray-800 border-gray-600 text-sm h-8" autoFocus /></div>
+                    <ScrollArea className="max-h-44">{filteredCountries.map((c) => (<button key={c.code} onClick={() => { setSelectedCountry(c.code); setShowCountrySelect(false); setCountrySearch('') }} className={cn('w-full text-left px-4 py-2 text-sm hover:bg-gray-700 transition-colors flex items-center gap-2', selectedCountry === c.code ? 'bg-purple-600/30 text-purple-300' : 'text-gray-300')}>{c.flag} {c.name}</button>))}</ScrollArea>
+                  </div>
+                )}
+              </div>
+              <span className="text-xs font-medium px-2.5 py-1 rounded-full bg-white/10">{getCountryFlag(selectedCountry)} {getCountryName(selectedCountry)}</span>
               {micButton}
             </div>
           </div>
 
           {/* Own camera full screen - zoom out effect */}
           <div className="absolute inset-0 overflow-hidden">
-            <video ref={localVideoRef} autoPlay playsInline muted style={{ transform: 'scaleX(-1)' }} className="w-[130%] h-[130%] object-cover" />
+            <video ref={localVideoRef} autoPlay playsInline muted style={{ transform: 'scaleX(-1)' }} className="w-[160%] h-[160%] object-cover" />
           </div>
           <div className="absolute inset-0 bg-black/40" />
 
@@ -2081,17 +2088,6 @@ function MainView() {
           <div className="flex-1 flex flex-col items-center justify-center z-10 gap-4">
             <div className="w-16 h-16 border-4 border-purple-500 border-t-transparent rounded-full animate-spin" />
             <p className="text-white text-lg font-medium">Buscando persona...</p>
-            <p className="text-gray-400 text-sm">Filtro: {getCountryFlag(selectedCountry)} {getCountryName(selectedCountry)}</p>
-          </div>
-
-          {/* Country change while searching */}
-          <div className="relative z-30 px-3 pb-2">
-            <div className="flex justify-center">
-              <div className="bg-gray-900/95 backdrop-blur border border-gray-700 rounded-xl shadow-2xl max-h-52 overflow-hidden max-w-sm w-full">
-                <div className="p-2"><Input placeholder="Buscar pais..." value={countrySearch} onChange={(e) => setCountrySearch(e.target.value)} className="bg-gray-800 border-gray-600 text-sm h-8" /></div>
-                <ScrollArea className="max-h-36">{filteredCountries.map((c) => (<button key={c.code} onClick={() => { setSelectedCountry(c.code); setCountrySearch('') }} className={cn('w-full text-left px-4 py-1.5 text-sm hover:bg-gray-700 transition-colors flex items-center gap-2', selectedCountry === c.code ? 'bg-purple-600/30 text-purple-300' : 'text-gray-300')}>{c.flag} {c.name}</button>))}</ScrollArea>
-              </div>
-            </div>
           </div>
 
           {/* Cancel button */}
@@ -2110,6 +2106,18 @@ function MainView() {
           <div className="flex items-center justify-between px-3 py-2 bg-gray-900 border-b border-gray-800 shrink-0 z-30">
             <div className="flex items-center gap-2">
               <h1 className="text-sm font-black"><span className="text-purple-400">dhobby</span><span className="text-green-400">tv</span></h1>
+              <div className="relative">
+                <button onClick={() => setShowCountrySelect(!showCountrySelect)} className="rounded-full p-1.5 bg-white/10 hover:bg-white/20 transition-all cursor-pointer" title="Cambiar pais para siguiente">
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                </button>
+                {showCountrySelect && (
+                  <div className="absolute left-0 top-full mt-2 bg-gray-900/95 backdrop-blur border border-gray-700 rounded-xl shadow-2xl w-72 overflow-hidden z-50">
+                    <div className="p-2"><Input placeholder="Buscar pais..." value={countrySearch} onChange={(e) => setCountrySearch(e.target.value)} className="bg-gray-800 border-gray-600 text-sm h-8" autoFocus /></div>
+                    <ScrollArea className="max-h-44">{filteredCountries.map((c) => (<button key={c.code} onClick={() => { setSelectedCountry(c.code); setShowCountrySelect(false); setCountrySearch('') }} className={cn('w-full text-left px-4 py-2 text-sm hover:bg-gray-700 transition-colors flex items-center gap-2', selectedCountry === c.code ? 'bg-purple-600/30 text-purple-300' : 'text-gray-300')}>{c.flag} {c.name}</button>))}</ScrollArea>
+                  </div>
+                )}
+              </div>
+              <span className="text-[10px] text-gray-500">{getCountryFlag(selectedCountry)} {getCountryName(selectedCountry)}</span>
             </div>
             <div className="flex items-center gap-1.5 bg-gray-800 rounded-full px-3 py-1">
               <span>{getGenderShort(partner.gender)}</span>
@@ -2125,7 +2133,7 @@ function MainView() {
           <div className="flex-1 flex flex-col sm:flex-row min-h-0 relative">
             {/* Remote video (stranger) - TOP on mobile, LEFT on desktop */}
             <div className="relative flex-1 bg-gray-900 min-h-0 border-b sm:border-b-0 sm:border-r border-gray-800">
-              <video ref={remoteVideoRef} autoPlay playsInline className="w-full h-full object-cover bg-gray-900" />
+              <video ref={remoteVideoRef} autoPlay playsInline style={{ transform: 'scaleX(-1)' }} className="w-full h-full object-cover bg-gray-900" />
               {remoteMuted && (
                 <button onClick={() => { if (remoteVideoRef.current) { remoteVideoRef.current.muted = false; setRemoteMuted(false) } }} className="absolute top-3 left-1/2 -translate-x-1/2 z-40 bg-red-600/90 hover:bg-red-600 text-white rounded-full px-4 py-2 text-xs font-medium shadow-lg flex items-center gap-2 animate-pulse cursor-pointer">
                   <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.536 8.464a5 5 0 010 7.072M12 6.253v11.494M17.657 6.343a8 8 0 010 11.314M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" /></svg>
@@ -2139,7 +2147,7 @@ function MainView() {
 
             {/* Local video (you) - BOTTOM on mobile, RIGHT on desktop - zoom out effect */}
             <div className="relative flex-1 bg-gray-900 min-h-0 overflow-hidden">
-              <video ref={localVideoRef} autoPlay playsInline muted style={{ transform: 'scaleX(-1)' }} className="w-[130%] h-[130%] object-cover bg-gray-900" />
+              <video ref={localVideoRef} autoPlay playsInline muted style={{ transform: 'scaleX(-1)' }} className="w-[160%] h-[160%] object-cover bg-gray-900" />
               <div className="absolute bottom-2 left-2 bg-black/60 rounded-full px-2.5 py-1 text-[10px] text-green-400 font-medium">
                 {displayName} {getGenderShort(user?.gender || '')}
               </div>
